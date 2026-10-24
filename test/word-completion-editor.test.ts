@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { KeybindingsManager } from "@earendil-works/pi-coding-agent";
+import { fromPartial } from "@total-typescript/shoehorn";
 import {
 	CURSOR_MARKER,
 	renderFakeCursor,
@@ -24,8 +25,8 @@ function setup(
 	appBindings: Record<string, { defaultKeys: string; description: string }> = {},
 ) {
 	let renders = 0;
-	const tui = { terminal: { rows: 40, columns: 80 }, requestRender: () => renders++ } as unknown as TUI;
-	const theme = { borderColor: (s: string) => s, selectList: {} } as unknown as EditorTheme;
+	const tui = fromPartial<TUI>({ terminal: { rows: 40, columns: 80 }, requestRender: () => renders++ });
+	const theme = fromPartial<EditorTheme>({ borderColor: (s: string) => s, selectList: {} });
 	const keybindings = new TuiKeybindingsManager({
 		...TUI_KEYBINDINGS,
 		"app.clear": { defaultKeys: "ctrl+c", description: "Clear editor" },
