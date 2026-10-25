@@ -1,5 +1,6 @@
 import { CURSOR_MARKER, renderFakeCursor, visibleWidth } from "@earendil-works/pi-tui";
 
+/** Inputs for painting a ghost into one editor render. */
 export interface GhostOptions {
 	/** Rest of the word to show after the cursor. */
 	suffix: string;
@@ -11,8 +12,11 @@ export interface GhostOptions {
 	style: (text: string) => string;
 }
 
+/** Lines after painting, and whether a ghost was painted into them. */
 export interface GhostResult {
+	/** A fresh array the caller owns, painted or not. */
 	lines: string[];
+	/** True when the ghost was painted. */
 	painted: boolean;
 }
 
@@ -27,9 +31,9 @@ const segmenter = new Intl.Segmenter();
  * Leaves the lines untouched when there is no focused end-of-line cursor or the ghost would
  * overflow the content width.
  */
-export function paintGhost(lines: string[], options: GhostOptions): GhostResult {
+export function paintGhost(lines: readonly string[], options: GhostOptions): GhostResult {
 	const { suffix, width, style } = options;
-	const unchanged = { lines, painted: false };
+	const unchanged = { lines: [...lines], painted: false };
 	if (suffix.length === 0) return unchanged;
 
 	const row = lines.findIndex((line) => line.includes(END_CURSOR));
@@ -45,7 +49,8 @@ export function paintGhost(lines: string[], options: GhostOptions): GhostResult 
 	const extra = visibleWidth(suffix) - 1;
 	if (extra > freeColumns) return unchanged;
 
-	const first = segmenter.segment(suffix)[Symbol.iterator]().next().value!.segment;
+	const first = segmenter.segment(suffix)[Symbol.iterator]().next().value?.segment;
+	if (first === undefined) return unchanged;
 	const rest = suffix.slice(first.length);
 	const ghost = renderFakeCursor(style(first)) + (rest ? style(rest) : "");
 	const painted = [...lines];

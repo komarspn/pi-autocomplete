@@ -27,6 +27,7 @@ function setup(
 	let renders = 0;
 	const tui = fromPartial<TUI>({ terminal: { rows: 40, columns: 80 }, requestRender: () => renders++ });
 	const theme = fromPartial<EditorTheme>({ borderColor: (s: string) => s, selectList: {} });
+	// Real pi-tui instance; pi-coding-agent's KeybindingsManager subclass adds only members the editor does not use.
 	const keybindings = new TuiKeybindingsManager({
 		...TUI_KEYBINDINGS,
 		"app.clear": { defaultKeys: "ctrl+c", description: "Clear editor" },

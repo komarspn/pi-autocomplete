@@ -2,7 +2,7 @@ import type { WordPredictionBackend } from "./word-completion-provider.ts";
 
 // Common English words, roughly most frequent first, so the first match is the likeliest.
 // Placeholder until the n-gram engine learns from the user's own prompts.
-const DEFAULT_WORDS = `
+const DEFAULT_WORDS: readonly string[] = `
 the and that have for not with you this but his from they say her she will one all would
 there their what out about who get which when make can like time just him know take people
 into year your good some could them see other than then now look only come its over think

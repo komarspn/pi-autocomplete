@@ -3,6 +3,7 @@ import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 import { paintGhost } from "./ghost-text.ts";
 import { type WordPredictionBackend, WordCompletionProvider } from "./word-completion-provider.ts";
 
+/** CustomEditor options plus the word source and ghost styling. */
 export interface WordCompletionEditorOptions extends CustomEditorOptions {
 	backend: WordPredictionBackend;
 	/** Styles ghost text, usually the theme's dim color. */

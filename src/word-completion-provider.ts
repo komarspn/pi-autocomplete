@@ -2,6 +2,7 @@
 export interface WordPredictionBackend {
 	/** Resolves to the rest of the word after `prefix`, or null. */
 	complete(before: string, prefix: string): Promise<string | null>;
+	/** Reports whether the user accepted `suggestion` for `prefix`. Returns at once and must not throw. */
 	feedback(before: string, prefix: string, suggestion: string, accepted: boolean): void;
 }
 
@@ -30,7 +31,7 @@ export class WordCompletionProvider {
 		this.onUpdate = onUpdate;
 	}
 
-	getWordCompletion(lines: string[], cursorLine: number, cursorCol: number): string | null {
+	getWordCompletion(lines: readonly string[], cursorLine: number, cursorCol: number): string | null {
 		const query = buildQuery(lines, cursorLine, cursorCol);
 		if (!query) return null;
 		if (this.cache.has(query.key)) return this.cache.get(query.key) ?? null;
@@ -38,7 +39,13 @@ export class WordCompletionProvider {
 		return null;
 	}
 
-	wordCompletionFeedback(lines: string[], cursorLine: number, cursorCol: number, suggestion: string, accepted: boolean): void {
+	wordCompletionFeedback(
+		lines: readonly string[],
+		cursorLine: number,
+		cursorCol: number,
+		suggestion: string,
+		accepted: boolean,
+	): void {
 		const query = buildQuery(lines, cursorLine, cursorCol);
 		if (query) this.backend.feedback(query.before, query.prefix, suggestion, accepted);
 	}
@@ -48,13 +55,14 @@ export class WordCompletionProvider {
 		this.pending.add(query.key);
 		void this.backend.complete(query.before, query.prefix).then((suffix) => {
 			this.pending.delete(query.key);
+			// `||` on purpose: an empty suffix completes nothing, so cache it as null like a miss.
 			this.cache.set(query.key, suffix || null);
 			if (suffix) this.onUpdate();
 		});
 	}
 }
 
-function buildQuery(lines: string[], cursorLine: number, cursorCol: number): Query | undefined {
+function buildQuery(lines: readonly string[], cursorLine: number, cursorCol: number): Query | undefined {
 	const line = lines[cursorLine];
 	if (line === undefined || cursorCol !== line.length) return undefined;
 	const prefix = WORD_AT_END.exec(line)?.[0];
