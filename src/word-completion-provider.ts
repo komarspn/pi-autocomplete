@@ -15,7 +15,35 @@ interface Query {
 	prefix: string;
 }
 
+/** The whole word of the last returned ghost, and the context it was for. */
+interface ShownWord {
+	before: string;
+	word: string;
+}
+
+/** The request in flight, and the backend generation it was sent to. */
+interface ActiveRequest {
+	key: string;
+	generation: number;
+}
+
+/** The last buildQuery input and its result. */
+interface QueryMemo {
+	lines: readonly string[];
+	cursorLine: number;
+	cursorCol: number;
+	query: Query | undefined;
+}
+
+/** What the last getWordCompletion call returned, and for which query key. */
+interface Displayed {
+	key: string;
+	suffix: string | null;
+}
+
 const MAX_BEFORE = 2000;
+// Same cap as omp. Clearing the whole map at the cap is cheaper than LRU and loses only recent misses.
+const MAX_CACHE = 256;
 const WORD_AT_END = /[\p{L}\p{M}']+$/u;
 
 /**
@@ -24,10 +52,16 @@ const WORD_AT_END = /[\p{L}\p{M}']+$/u;
  */
 export class WordCompletionProvider {
 	private readonly cache = new Map<string, string | null>();
-	private readonly pending = new Set<string>();
+	private active: ActiveRequest | undefined;
+	private queued: Query | undefined;
+	private lastShown: ShownWord | undefined;
+	private displayed: Displayed | undefined;
+	private memo: QueryMemo | undefined;
+	// Bumped on each backend change so answers from the old backend are dropped.
+	private generation = 0;
 	private readonly prose = new ProseSource();
 
-	private readonly backend: WordPredictionBackend;
+	private backend: WordPredictionBackend;
 	private readonly onUpdate: () => void;
 
 	constructor(backend: WordPredictionBackend, onUpdate: () => void) {
@@ -35,12 +69,30 @@ export class WordCompletionProvider {
 		this.onUpdate = onUpdate;
 	}
 
+	/**
+	 * Switches to another backend. Answers still in flight from the old one are neither cached nor shown,
+	 * and a request in flight still holds the single slot until it settles.
+	 */
+	setBackend(backend: WordPredictionBackend): void {
+		this.backend = backend;
+		this.generation++;
+		this.cache.clear();
+		this.queued = undefined;
+		this.lastShown = undefined;
+		this.displayed = undefined;
+	}
+
 	getWordCompletion(lines: readonly string[], cursorLine: number, cursorCol: number): string | null {
-		const query = buildQuery(lines, cursorLine, cursorCol, this.prose);
-		if (!query) return null;
-		if (this.cache.has(query.key)) return this.cache.get(query.key) ?? null;
-		this.request(query);
-		return null;
+		const query = this.query(lines, cursorLine, cursorCol);
+		if (!query) {
+			this.displayed = undefined;
+			return null;
+		}
+		if (!this.cache.has(query.key)) this.request(query);
+		const suffix = this.suggest(query);
+		if (suffix) this.lastShown = { before: query.before, word: query.prefix + suffix };
+		this.displayed = { key: query.key, suffix };
+		return suffix;
 	}
 
 	wordCompletionFeedback(
@@ -50,20 +102,67 @@ export class WordCompletionProvider {
 		suggestion: string,
 		accepted: boolean,
 	): void {
-		const query = buildQuery(lines, cursorLine, cursorCol, this.prose);
+		const query = this.query(lines, cursorLine, cursorCol);
 		if (query) this.backend.feedback(query.before, query.prefix, suggestion, accepted);
 	}
 
+	/** buildQuery, memoized on the last input because render asks again every frame. */
+	private query(lines: readonly string[], cursorLine: number, cursorCol: number): Query | undefined {
+		const memo = this.memo;
+		if (memo && memo.cursorLine === cursorLine && memo.cursorCol === cursorCol && sameLines(memo.lines, lines)) {
+			return memo.query;
+		}
+		const query = buildQuery(lines, cursorLine, cursorCol, this.prose);
+		// Copy: the editor mutates its lines array in place.
+		this.memo = { lines: [...lines], cursorLine, cursorCol, query };
+		return query;
+	}
+
+	/** The cached answer. A null or missing one falls back to the shown word, so typing through a ghost never blanks it. */
+	private suggest(query: Query): string | null {
+		return this.cache.get(query.key) ?? this.project(query) ?? null;
+	}
+
+	/** The rest of the last shown word when the user has typed more of it in the same context. */
+	private project(query: Query): string | undefined {
+		const shown = this.lastShown;
+		if (!shown || shown.before !== query.before || shown.word.length <= query.prefix.length) return undefined;
+		const typed = shown.word.slice(0, query.prefix.length);
+		if (typed.toLowerCase() !== query.prefix.toLowerCase()) return undefined;
+		return shown.word.slice(query.prefix.length);
+	}
+
+	/** Keeps one request in flight. A newer miss replaces the queued one, so fast typing sends the first and latest. */
 	private request(query: Query): void {
-		if (this.pending.has(query.key)) return;
-		this.pending.add(query.key);
+		const active = this.active;
+		if (active?.key === query.key && active.generation === this.generation) return;
+		if (active) this.queued = query;
+		else this.run(query);
+	}
+
+	private run(query: Query): void {
+		const generation = this.generation;
+		this.active = { key: query.key, generation };
 		void this.backend.complete(query.before, query.prefix).then((suffix) => {
-			this.pending.delete(query.key);
-			// `||` on purpose: an empty suffix completes nothing, so cache it as null like a miss.
-			this.cache.set(query.key, suffix || null);
-			if (suffix) this.onUpdate();
+			this.active = undefined;
+			const isCurrent = generation === this.generation;
+			if (isCurrent) {
+				if (this.cache.size >= MAX_CACHE) this.cache.clear();
+				// `||` on purpose: an empty suffix completes nothing, so cache it as null like a miss.
+				this.cache.set(query.key, suffix || null);
+			}
+			// Start the queued query before the repaint, so a render inside onUpdate finds it in flight.
+			const next = this.queued;
+			this.queued = undefined;
+			if (next && !this.cache.has(next.key)) this.run(next);
+			const displayed = this.displayed;
+			if (isCurrent && displayed?.key === query.key && this.suggest(query) !== displayed.suffix) this.onUpdate();
 		});
 	}
+}
+
+function sameLines(a: readonly string[], b: readonly string[]): boolean {
+	return a.length === b.length && a.every((line, i) => line === b[i]);
 }
 
 /** The query for the prose word ending at the cursor, or undefined when no ghost applies. */

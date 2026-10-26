@@ -45,6 +45,21 @@ describe("WordCompletionProvider", () => {
 		assert.equal(fake.calls.length, 1);
 	});
 
+	it("sends only the first and the latest query while typing fast against a slow backend", async () => {
+		const fake = fakeBackend(() => null);
+		const provider = new WordCompletionProvider(fake.backend, () => {});
+		const word = "abcdefghij";
+		for (let i = 1; i <= word.length; i++) provider.getWordCompletion([word.slice(0, i)], 0, i);
+		assert.deepEqual(fake.calls, [{ before: "", prefix: "a" }]);
+
+		await fake.flush();
+		await fake.flush();
+		assert.deepEqual(fake.calls, [
+			{ before: "", prefix: "a" },
+			{ before: "", prefix: "abcdefghij" },
+		]);
+	});
+
 	it("does not request a repaint for a null answer", async () => {
 		const fake = fakeBackend(() => null);
 		let updates = 0;
@@ -54,6 +69,108 @@ describe("WordCompletionProvider", () => {
 		assert.equal(updates, 0);
 		assert.equal(provider.getWordCompletion(["zzz"], 0, 3), null);
 		assert.equal(fake.calls.length, 1);
+	});
+
+	it("drops old answers once the cache is full", async () => {
+		const fake = fakeBackend(() => null);
+		const provider = new WordCompletionProvider(fake.backend, () => {});
+		for (let i = 0; i < 300; i++) {
+			provider.getWordCompletion([`${i} wor`], 0, `${i} wor`.length);
+			await fake.flush();
+		}
+		assert.equal(fake.calls.length, 300);
+		provider.getWordCompletion(["0 wor"], 0, 5);
+		assert.equal(fake.calls.length, 301);
+	});
+
+	it("does not request a repaint for an answer to a query no longer displayed", async () => {
+		const fake = fakeBackend(() => "lo");
+		let updates = 0;
+		const provider = new WordCompletionProvider(fake.backend, () => updates++);
+		provider.getWordCompletion(["say hel"], 0, 7);
+		provider.getWordCompletion(["say hel "], 0, 8);
+		await fake.flush();
+		assert.equal(updates, 0);
+	});
+
+	it("does not request a repaint when the answer matches the projected ghost", async () => {
+		const fake = fakeBackend((_before, prefix) => ("hello".startsWith(prefix) ? "hello".slice(prefix.length) : null));
+		let updates = 0;
+		const provider = new WordCompletionProvider(fake.backend, () => updates++);
+		provider.getWordCompletion(["say hel"], 0, 7);
+		await fake.flush();
+		assert.equal(provider.getWordCompletion(["say hel"], 0, 7), "lo");
+		assert.equal(updates, 1);
+
+		assert.equal(provider.getWordCompletion(["say hell"], 0, 8), "o");
+		await fake.flush();
+		assert.equal(updates, 1);
+	});
+
+	it("neither caches nor shows answers from before a backend change", async () => {
+		const old = fakeBackend(() => "lo");
+		const fresh = fakeBackend(() => null);
+		let updates = 0;
+		const provider = new WordCompletionProvider(old.backend, () => updates++);
+		provider.getWordCompletion(["say hel"], 0, 7);
+		provider.setBackend(fresh.backend);
+		await old.flush();
+		assert.equal(updates, 0);
+
+		assert.equal(provider.getWordCompletion(["say hel"], 0, 7), null);
+		assert.deepEqual(fresh.calls, [{ before: "say ", prefix: "hel" }]);
+	});
+
+	it("keeps one request in flight across backend changes", async () => {
+		const old = fakeBackend(() => "lo");
+		const fresh = fakeBackend(() => null);
+		const provider = new WordCompletionProvider(old.backend, () => {});
+		provider.getWordCompletion(["say hel"], 0, 7);
+		provider.setBackend(fresh.backend);
+		provider.getWordCompletion(["say hel"], 0, 7);
+		assert.equal(fresh.calls.length, 0, "waits for the old request to settle");
+
+		await old.flush();
+		assert.deepEqual(fresh.calls, [{ before: "say ", prefix: "hel" }]);
+	});
+
+	it("does not send a queued query twice when the repaint asks for it at once", async () => {
+		const fake = fakeBackend(() => "lo");
+		let provider: WordCompletionProvider | undefined;
+		provider = new WordCompletionProvider(fake.backend, () => provider?.getWordCompletion(["say wor"], 0, 7));
+		provider.getWordCompletion(["say hel"], 0, 7);
+		provider.getWordCompletion(["say wor"], 0, 7);
+		provider.getWordCompletion(["say hel"], 0, 7);
+		await fake.flush();
+		assert.deepEqual(
+			fake.calls.map((call) => call.prefix),
+			["hel", "wor"],
+		);
+	});
+
+	it("stops projecting a ghost from the old backend after a backend change", async () => {
+		const old = fakeBackend(() => "lo");
+		const provider = new WordCompletionProvider(old.backend, () => {});
+		provider.getWordCompletion(["say hel"], 0, 7);
+		await old.flush();
+		assert.equal(provider.getWordCompletion(["say hel"], 0, 7), "lo");
+
+		provider.setBackend(fakeBackend(() => null).backend);
+		assert.equal(provider.getWordCompletion(["say hell"], 0, 8), null);
+	});
+
+	it("sees edits made to the same lines array in place", async () => {
+		const fake = fakeBackend(() => null);
+		const provider = new WordCompletionProvider(fake.backend, () => {});
+		const lines = ["say hel"];
+		provider.getWordCompletion(lines, 0, 7);
+		await fake.flush();
+		lines[0] = "say wor";
+		provider.getWordCompletion(lines, 0, 7);
+		assert.deepEqual(fake.calls, [
+			{ before: "say ", prefix: "hel" },
+			{ before: "say ", prefix: "wor" },
+		]);
 	});
 
 	it("includes earlier lines in the context before the word", () => {

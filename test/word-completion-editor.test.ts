@@ -69,6 +69,21 @@ describe("WordCompletionEditor", () => {
 		assert.ok(cursorRow(t.editor.render(40)).includes(`hel${CURSOR_MARKER}${renderFakeCursor(dim("l"))}${dim("o")}`));
 	});
 
+	it("keeps showing the rest of the word while typing through the ghost", async () => {
+		const t = setup();
+		t.type("hel");
+		t.editor.render(40);
+		await t.flush();
+		t.editor.render(40);
+
+		t.type("l");
+		const ghost = `hell${CURSOR_MARKER}${renderFakeCursor(dim("o"))}`;
+		assert.ok(cursorRow(t.editor.render(40)).includes(ghost), "no blank frame before the answer");
+		// The backend knows nothing for "hell"; the shown word still stands.
+		await t.flush();
+		assert.ok(cursorRow(t.editor.render(40)).includes(ghost));
+	});
+
 	it("keeps every rendered line at the exact width with and without a ghost", async () => {
 		const t = setup();
 		t.type("hel");

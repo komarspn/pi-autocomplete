@@ -8,9 +8,15 @@ Reference: `docs/word-completion-architecture.md`, section 7.
 
 **Status:** ready-for-agent
 
-- [ ] With a slow fake backend, typing ten characters sends at most two requests (first and latest)
-- [ ] Null answers are cached and not re-requested
-- [ ] Cache stays within its cap
-- [ ] Typing through a shown ghost keeps showing the remaining suffix with no blank frame (test)
-- [ ] Answers from before a method change are neither cached nor shown
-- [ ] No repaint request for answers that do not change the screen
+- [x] With a slow fake backend, typing ten characters sends at most two requests (first and latest)
+- [x] Null answers are cached and not re-requested
+- [x] Cache stays within its cap
+- [x] Typing through a shown ghost keeps showing the remaining suffix with no blank frame (test)
+- [x] Answers from before a method change are neither cached nor shown
+- [x] No repaint request for answers that do not change the screen
+
+## Comments
+
+- The engine switch is `WordCompletionProvider.setBackend(backend)`. Ticket 07 maps a method to a backend and calls it, so the cache key holds no method. A request still in flight from the old backend keeps the single slot until it settles, and its answer is dropped.
+- Clearing projection on negative feedback moves to ticket 04 with the rest of reject handling.
+- Open from review: when the editor skips the provider (no focus, dropdown open), the provider still treats the last query as displayed, so an answer for it can request one repaint that changes nothing. Also, projection compares by slicing before lowercasing, so letters whose lowercase form is longer (`İ`) do not project.
