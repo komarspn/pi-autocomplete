@@ -97,6 +97,16 @@ describe("WordCompletionEditor", () => {
 		assert.ok(!cursorRow(t.editor.render(40)).includes(GHOST));
 	});
 
+	it("shows no ghost while typing a path, a code span or a slash command", async () => {
+		for (const text of ["open src/hel", "run `hel", "/hel"]) {
+			const t = setup(() => "lo");
+			t.type(text);
+			t.editor.render(40);
+			await t.flush();
+			assert.ok(!cursorRow(t.editor.render(40)).includes(GHOST), text);
+		}
+	});
+
 	it("shows no ghost when the editor is not focused", async () => {
 		const t = setup();
 		t.type("hel");
