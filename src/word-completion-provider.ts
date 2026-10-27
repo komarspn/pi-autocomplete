@@ -75,6 +75,14 @@ export class WordCompletionProvider {
 	 */
 	setBackend(backend: WordPredictionBackend): void {
 		this.backend = backend;
+		this.reset();
+	}
+
+	/**
+	 * Forgets every answer, for when the backend has learned something new. Answers still in flight
+	 * are neither cached nor shown.
+	 */
+	reset(): void {
 		this.generation++;
 		this.cache.clear();
 		this.queued = undefined;

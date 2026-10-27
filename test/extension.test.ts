@@ -18,30 +18,64 @@ function fakePi(handlers: Map<string, Handler>): ExtensionAPI {
 	});
 }
 
+function ctx(setEditorComponent: (factory: EditorFactory) => void = () => {}): ExtensionContext {
+	return fromPartial<ExtensionContext>({
+		hasUI: true,
+		ui: { setEditorComponent, theme: { fg: (_color: string, text: string) => text } },
+	});
+}
+
+/** Rendered lines without pi's cursor markers, which split the ghost's first letter from the rest. */
+function plainText(lines: readonly string[]): string {
+	return lines.join("\n").replace(/\x1b_[^\x07]*\x07/g, "");
+}
+
+/** Runs the extension through session start and builds the editor it installs. */
+async function startSession() {
+	const handlers = new Map<string, Handler>();
+	let factory: EditorFactory | undefined;
+	wordCompletion(fakePi(handlers));
+	await handlers.get("session_start")?.({ type: "session_start" }, ctx((f) => (factory = f)));
+	assert.ok(factory, "editor factory set");
+	const tui = fromPartial<TUI>({ terminal: { rows: 40, columns: 80 }, requestRender() {} });
+	const theme = fromPartial<EditorTheme>({ borderColor: (s: string) => s, selectList: {} });
+	// Real pi-tui instance; pi-coding-agent's KeybindingsManager subclass adds only members the editor does not use.
+	const keybindings = new TuiKeybindingsManager(TUI_KEYBINDINGS) as unknown as KeybindingsManager;
+	const editor = factory(tui, theme, keybindings);
+	assert.ok(editor instanceof WordCompletionEditor);
+	editor.focused = true;
+	return { handlers, editor };
+}
+
 describe("extension", () => {
 	it("installs the word-completion editor on session start", async () => {
-		const handlers = new Map<string, Handler>();
-		const pi = fakePi(handlers);
-		let factory: EditorFactory | undefined;
-		const ctx = fromPartial<ExtensionContext>({
-			hasUI: true,
-			ui: {
-				setEditorComponent: (f: EditorFactory) => {
-					factory = f;
-				},
-				theme: { fg: (_color: string, text: string) => text },
-			},
-		});
+		const { editor } = await startSession();
+		assert.ok(editor instanceof WordCompletionEditor);
+	});
 
-		wordCompletion(pi);
-		await handlers.get("session_start")?.({ type: "session_start" }, ctx);
+	it("learns interactive prompts from the input event and drops stale ghost answers", async () => {
+		const { handlers, editor } = await startSession();
+		const ghostFor = async (text: string) => {
+			editor.setText(text);
+			editor.render(40);
+			await new Promise((resolve) => setImmediate(resolve));
+			return plainText(editor.render(40));
+		};
+		assert.doesNotMatch(await ghostFor("zygo"), /morphic/);
 
-		assert.ok(factory, "editor factory set");
-		const tui = fromPartial<TUI>({ terminal: { rows: 40 }, requestRender() {} });
-		const theme = fromPartial<EditorTheme>({ borderColor: (s: string) => s, selectList: {} });
-		// Real pi-tui instance; pi-coding-agent's KeybindingsManager subclass adds only members the editor does not use.
-		const keybindings = new TuiKeybindingsManager(TUI_KEYBINDINGS) as unknown as KeybindingsManager;
-		assert.ok(factory(tui, theme, keybindings) instanceof WordCompletionEditor);
+		await handlers.get("input")?.({ type: "input", text: "the zygomorphic flower", source: "interactive" }, ctx());
+		assert.match(await ghostFor("zygo"), /morphic/);
+	});
+
+	it("does not learn input from RPC clients or extensions", async () => {
+		const { handlers, editor } = await startSession();
+		for (const source of ["rpc", "extension"] as const) {
+			await handlers.get("input")?.({ type: "input", text: "the zygomorphic flower", source }, ctx());
+		}
+		editor.setText("zygo");
+		editor.render(40);
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.doesNotMatch(plainText(editor.render(40)), /morphic/);
 	});
 
 	it("does nothing without a UI", async () => {

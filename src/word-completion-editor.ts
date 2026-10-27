@@ -49,6 +49,11 @@ export class WordCompletionEditor extends CustomEditor {
 		this.provider = new WordCompletionProvider(backend, () => this.tui.requestRender());
 	}
 
+	/** Drops cached completions, so the next render asks the backend again. Call after the backend learns. */
+	resetWordCompletion(): void {
+		this.provider.reset();
+	}
+
 	override render(width: number): string[] {
 		const lines = super.render(width);
 		this.shown = undefined;

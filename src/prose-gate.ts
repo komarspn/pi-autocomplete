@@ -11,6 +11,9 @@ const DIGIT = /\d/;
 const MAX_PROSE_BUFFER_LENGTH = 20_000;
 /** Lines above this many UTF-16 units get no prose assistance. */
 const MAX_PROSE_LINE_LENGTH = 1_000;
+const WORD = /[\p{L}\p{M}']+/gu;
+const EDGE_APOSTROPHES = /^'+|'+$/g;
+const SENTENCE_END = /[.!?]/;
 
 /** The whitespace-delimited token around `text[start, end)`. */
 function tokenAt(text: string, start: number, end: number): string {
@@ -34,6 +37,53 @@ export function isProseWord(text: string, masked: string, start: number, end: nu
 	}
 	if (CAMEL_CASE.test(token) || DIGIT.test(token)) return false;
 	return !text.trimStart().startsWith("/") && !text.startsWith("->") && !text.startsWith("=>");
+}
+
+/**
+ * The prose words of `text`, lowercased, in runs of neighbors. A run ends at a newline, a sentence
+ * end, or a word the gates reject. Ends with an empty run when the text ends after such a break.
+ * Slash commands and text above the buffer cap have no runs. Words after an unclosed backtick in
+ * their paragraph are rejected, as ProseSource rejects them while typing.
+ */
+export function proseRuns(text: string): string[][] {
+	if (text.length > MAX_PROSE_BUFFER_LENGTH || text.trimStart().startsWith("/")) return [];
+	const masked = maskNonProse(text);
+	const runs: string[][] = [];
+	let run: string[] = [];
+	const breakRun = (): void => {
+		if (run.length === 0) return;
+		run = [];
+		runs.push(run);
+	};
+	runs.push(run);
+	let offset = 0;
+	let isSpanOpen = false;
+	for (const line of text.split("\n")) {
+		breakRun();
+		const maskedLine = masked.slice(offset, offset + line.length);
+		offset += line.length + 1;
+		// Closed spans are blank in the mask, so a backtick left in it opens a span that ends at a blank line.
+		if (!line.trim()) isSpanOpen = false;
+		const spanStart: number = isSpanOpen ? 0 : maskedLine.indexOf("`");
+		isSpanOpen = spanStart !== -1;
+		if (line.length > MAX_PROSE_LINE_LENGTH) continue;
+		let end = 0;
+		for (const match of line.matchAll(WORD)) {
+			const start = match.index;
+			const gap = line.slice(end, start);
+			end = start + match[0].length;
+			const word = match[0].replace(EDGE_APOSTROPHES, "").toLowerCase();
+			const isInOpenSpan = spanStart !== -1 && start >= spanStart;
+			if (isInOpenSpan || !isProseWord(line, maskedLine, start, end)) {
+				breakRun();
+				continue;
+			}
+			if (SENTENCE_END.test(gap)) breakRun();
+			if (word) run.push(word);
+		}
+		if (SENTENCE_END.test(line.slice(end))) breakRun();
+	}
+	return runs;
 }
 
 /**
