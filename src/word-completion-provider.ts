@@ -49,6 +49,7 @@ const WORD_AT_END = /[\p{L}\p{M}']+$/u;
 /**
  * Sync bridge between the editor's render and an async backend. A miss returns null at once,
  * asks the backend, and calls `onUpdate` when a suffix arrives so the editor can repaint.
+ * Without a backend, word completion is off: no ghost and no requests.
  */
 export class WordCompletionProvider {
 	private readonly cache = new Map<string, string | null>();
@@ -61,19 +62,19 @@ export class WordCompletionProvider {
 	private generation = 0;
 	private readonly prose = new ProseSource();
 
-	private backend: WordPredictionBackend;
+	private backend: WordPredictionBackend | undefined;
 	private readonly onUpdate: () => void;
 
-	constructor(backend: WordPredictionBackend, onUpdate: () => void) {
+	constructor(backend: WordPredictionBackend | undefined, onUpdate: () => void) {
 		this.backend = backend;
 		this.onUpdate = onUpdate;
 	}
 
 	/**
-	 * Switches to another backend. Answers still in flight from the old one are neither cached nor shown,
-	 * and a request in flight still holds the single slot until it settles.
+	 * Switches to another backend, or turns word completion off with undefined. Answers still in flight
+	 * from the old one are neither cached nor shown, and a request in flight still holds the single slot until it settles.
 	 */
-	setBackend(backend: WordPredictionBackend): void {
+	setBackend(backend: WordPredictionBackend | undefined): void {
 		this.backend = backend;
 		this.reset();
 	}
@@ -91,7 +92,7 @@ export class WordCompletionProvider {
 	}
 
 	getWordCompletion(lines: readonly string[], cursorLine: number, cursorCol: number): string | null {
-		const query = this.query(lines, cursorLine, cursorCol);
+		const query = this.backend && this.query(lines, cursorLine, cursorCol);
 		if (!query) {
 			this.displayed = undefined;
 			return null;
@@ -113,7 +114,7 @@ export class WordCompletionProvider {
 		// A rejected word must not come back through projection.
 		if (!accepted) this.lastShown = undefined;
 		const query = this.query(lines, cursorLine, cursorCol);
-		if (query) this.backend.feedback(query.before, query.prefix, suggestion, accepted);
+		if (query) this.backend?.feedback(query.before, query.prefix, suggestion, accepted);
 	}
 
 	/** buildQuery, memoized on the last input because render asks again every frame. */
@@ -151,9 +152,11 @@ export class WordCompletionProvider {
 	}
 
 	private run(query: Query): void {
+		const backend = this.backend;
+		if (!backend) return;
 		const generation = this.generation;
 		this.active = { key: query.key, generation };
-		void this.backend.complete(query.before, query.prefix).then((suffix) => {
+		void backend.complete(query.before, query.prefix).then((suffix) => {
 			this.active = undefined;
 			const isCurrent = generation === this.generation;
 			if (isCurrent) {

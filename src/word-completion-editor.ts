@@ -5,7 +5,8 @@ import { type WordPredictionBackend, WordCompletionProvider } from "./word-compl
 
 /** CustomEditor options plus the word source and ghost styling. */
 export interface WordCompletionEditorOptions extends CustomEditorOptions {
-	backend: WordPredictionBackend;
+	/** The word source, or undefined while word completion is off. */
+	backend: WordPredictionBackend | undefined;
 	/** Styles ghost text, usually the theme's dim color. */
 	style: (text: string) => string;
 }
@@ -47,6 +48,18 @@ export class WordCompletionEditor extends CustomEditor {
 		this.appKeybindings = keybindings;
 		this.style = style;
 		this.provider = new WordCompletionProvider(backend, () => this.tui.requestRender());
+	}
+
+	/**
+	 * Switches the word source, or turns word completion off with undefined. Takes effect on the next
+	 * render; answers from the old source are never shown or accepted.
+	 */
+	setWordCompletionBackend(backend: WordPredictionBackend | undefined): void {
+		this.provider.setBackend(backend);
+		// A key before the next render must not accept the old source's ghost.
+		this.shown = undefined;
+		// The switch happens outside an input event, so nothing else repaints the old ghost away.
+		this.tui.requestRender();
 	}
 
 	/** Drops cached completions, so the next render asks the backend again. Call after the backend learns. */

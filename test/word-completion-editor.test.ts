@@ -46,8 +46,12 @@ function setup(
 	}) as unknown as KeybindingsManager;
 	const feedback: Array<{ suggestion: string; accepted: boolean }> = [];
 	const pending: Array<() => void> = [];
+	let calls = 0;
 	const backend: WordPredictionBackend = {
-		complete: (_before, prefix) => new Promise((resolve) => pending.push(() => resolve(answer(prefix)))),
+		complete: (_before, prefix) => {
+			calls++;
+			return new Promise((resolve) => pending.push(() => resolve(answer(prefix))));
+		},
 		feedback: (_before, _prefix, suggestion, accepted) => feedback.push({ suggestion, accepted }),
 	};
 	const editor = new WordCompletionEditor(tui, theme, keybindings, { backend, style: dim });
@@ -66,7 +70,7 @@ function setup(
 		await flush();
 		editor.render(40);
 	};
-	return { editor, type, flush, showGhost, feedback, renders: () => renders };
+	return { editor, type, flush, showGhost, feedback, renders: () => renders, calls: () => calls };
 }
 
 function cursorRow(lines: string[]): string {
@@ -399,5 +403,59 @@ describe("WordCompletionEditor", () => {
 		t.editor.onAction("app.clear", () => cleared++);
 		t.editor.handleInput(CTRL_C);
 		assert.equal(cleared, 1);
+	});
+
+	it("shows no ghost and asks the backend nothing while word completion is off", async () => {
+		const t = setup();
+		t.editor.setWordCompletionBackend(undefined);
+		await t.showGhost("hel");
+		assert.ok(!cursorRow(t.editor.render(40)).includes(GHOST));
+		assert.equal(t.calls(), 0);
+
+		t.editor.handleInput(TAB);
+		assert.equal(t.editor.getText(), "hel", "Tab goes to pi");
+		t.editor.handleInput(LEFT);
+		t.editor.handleInput(RIGHT);
+		t.type("p");
+		assert.equal(t.editor.getText(), "help", "Right moves the cursor");
+		assert.deepEqual(t.feedback, []);
+	});
+
+	it("drops an answer still in flight when word completion turns off", async () => {
+		const t = setup();
+		t.type("hel");
+		t.editor.render(40);
+		t.editor.setWordCompletionBackend(undefined);
+		const before = t.renders();
+		await t.flush();
+		assert.equal(t.renders(), before);
+		assert.ok(!cursorRow(t.editor.render(40)).includes(GHOST));
+	});
+
+	it("neither accepts nor shows the old backend's ghost after a backend switch", async () => {
+		const t = setup();
+		await t.showGhost("hel");
+		t.editor.setWordCompletionBackend({ complete: () => new Promise(() => {}), feedback: () => {} });
+		t.editor.handleInput(TAB);
+		assert.equal(t.editor.getText(), "hel", "Tab before the next render");
+		assert.ok(!cursorRow(t.editor.render(40)).includes(GHOST));
+	});
+
+	it("shows only the new backend's answer after a switch mid-word", async () => {
+		const t = setup();
+		t.type("hel");
+		t.editor.render(40);
+		const pending: Array<() => void> = [];
+		t.editor.setWordCompletionBackend({
+			complete: () => new Promise((resolve) => pending.push(() => resolve("p"))),
+			feedback: () => {},
+		});
+		t.editor.render(40);
+		await t.flush();
+		assert.ok(!cursorRow(t.editor.render(40)).includes(GHOST), "old answer dropped");
+
+		for (const resolve of pending.splice(0)) resolve();
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.ok(cursorRow(t.editor.render(40)).includes(`hel${CURSOR_MARKER}${renderFakeCursor(dim("p"))}`));
 	});
 });
