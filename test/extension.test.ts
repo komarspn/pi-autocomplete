@@ -61,6 +61,20 @@ function plainText(lines: readonly string[]): string {
 	return lines.join("\n").replace(/\x1b_[^\x07]*\x07/g, "");
 }
 
+/**
+ * Calls `read` until its result matches `pattern`, or 1 s passes, and returns the last result.
+ * For state that background work such as `NgramStore.open` fills in with no promise to await.
+ */
+async function eventually(read: () => Promise<string>, pattern: RegExp): Promise<string> {
+	const deadline = Date.now() + 1000;
+	let result = await read();
+	while (!pattern.test(result) && Date.now() < deadline) {
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		result = await read();
+	}
+	return result;
+}
+
 /** Runs the extension through session start and builds the editor it installs. */
 async function startSession() {
 	const handlers = new Map<string, Handler>();
@@ -143,12 +157,7 @@ describe("extension", () => {
 		assert.doesNotMatch(await second.ghostFor("zygo"), /morphic/);
 		await second.run("auto");
 		// Turning it on opens the store, which loads the snapshot in the background.
-		let ghost = await second.ghostFor("zygo");
-		for (let tries = 0; tries < 100 && !/morphic/.test(ghost); tries++) {
-			await new Promise((resolve) => setTimeout(resolve, 10));
-			ghost = await second.ghostFor("zygo");
-		}
-		assert.match(ghost, /morphic/);
+		assert.match(await eventually(() => second.ghostFor("zygo"), /morphic/), /morphic/);
 		const saved: unknown = JSON.parse(readFileSync(join(agentDir, "word-completion", "settings.json"), "utf8"));
 		assert.deepEqual(saved, { method: "auto" });
 		await second.handlers.get("session_shutdown")?.({ type: "session_shutdown" }, ctx());
