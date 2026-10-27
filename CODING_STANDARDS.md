@@ -117,6 +117,14 @@ These come from pi's [Packages](https://github.com/earendil-works/pi/blob/main/p
 - Guard UI work. Use `ctx.hasUI` for interactions that interactive and RPC clients both support, and `ctx.mode === "tui"` for terminal-only behavior. `extensions/index.ts` checks only `ctx.hasUI` before `ctx.ui.setEditorComponent`, which is enough because RPC mode ignores that call. Code that does terminal work itself, outside a pi UI call, must check `ctx.mode`.
 - After `ctx.reload()`, do not reuse state from the old runtime.
 
+### N-gram engine lifetime
+
+An `NgramStore` owns its backend's counts. `NgramBackend.restore` adds the snapshot's counts to what the backend already holds, so a store opened on a used backend counts every word twice.
+
+- Pair each new `NgramStore` with a new `NgramBackend`. `extensions/index.ts` keeps them together as one `Engine`.
+- Close the store as soon as its backend stops answering, for example when the setting turns `off`. `close` saves what was learned and stops `open` from reading more past sessions. Dropping only the backend reference leaves that reading running.
+- Before acting on a background `open` result, check that its engine is still the current one, as the `engine === started` check does.
+
 ### Editor and rendering
 
 - Extend `CustomEditor` to replace the main editor, and pass keys the editor does not handle to `super.handleInput`. This keeps pi's shortcuts and agent controls working.
