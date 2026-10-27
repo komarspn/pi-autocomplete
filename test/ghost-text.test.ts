@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { CURSOR_MARKER, renderFakeCursor, visibleWidth } from "@earendil-works/pi-tui";
-import { paintGhost } from "../src/ghost-text.ts";
+import { paintGhost, paintSpace } from "../src/ghost-text.ts";
 
 const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
 const END_CURSOR = CURSOR_MARKER + renderFakeCursor(" ");
@@ -73,5 +73,23 @@ describe("paintGhost", () => {
 	it("does nothing for an empty suffix", () => {
 		const line = cursorLine("hel", 20, 1);
 		assert.equal(paintGhost([line], { suffix: "", width: 20, paddingX: 1, style: dim }).painted, false);
+	});
+});
+
+describe("paintSpace", () => {
+	it("puts a space before the cursor and keeps the line width exact", () => {
+		const result = paintSpace([cursorLine("hello", 20, 1)], { width: 20, paddingX: 1 });
+		const [line = ""] = result.lines;
+		assert.equal(result.painted, true);
+		assert.equal(line, ` hello ${END_CURSOR}${" ".repeat(11)} `);
+		assert.equal(visibleWidth(line), 20);
+	});
+
+	it("does nothing when no column is free before the right padding", () => {
+		// content width 18: 17 characters plus the cursor cell fill it.
+		const line = cursorLine("x".repeat(17), 20, 1);
+		const result = paintSpace([line], { width: 20, paddingX: 1 });
+		assert.equal(result.painted, false);
+		assert.deepEqual(result.lines, [line]);
 	});
 });

@@ -102,6 +102,8 @@ export class WordCompletionProvider {
 		suggestion: string,
 		accepted: boolean,
 	): void {
+		// A rejected word must not come back through projection.
+		if (!accepted) this.lastShown = undefined;
 		const query = this.query(lines, cursorLine, cursorCol);
 		if (query) this.backend.feedback(query.before, query.prefix, suggestion, accepted);
 	}

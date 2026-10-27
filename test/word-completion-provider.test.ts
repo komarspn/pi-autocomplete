@@ -294,4 +294,15 @@ describe("WordCompletionProvider", () => {
 		provider.wordCompletionFeedback(["say hel"], 0, 7, "lo", true);
 		assert.deepEqual(fake.feedback, [{ before: "say ", prefix: "hel", suggestion: "lo", accepted: true }]);
 	});
+
+	it("stops projecting the shown word after negative feedback", async () => {
+		const fake = fakeBackend((_before, prefix) => (prefix === "hel" ? "lo" : null));
+		const provider = new WordCompletionProvider(fake.backend, () => {});
+		provider.getWordCompletion(["say hel"], 0, 7);
+		await fake.flush();
+		assert.equal(provider.getWordCompletion(["say hel"], 0, 7), "lo");
+
+		provider.wordCompletionFeedback(["say hel"], 0, 7, "lo", false);
+		assert.equal(provider.getWordCompletion(["say hell"], 0, 8), null);
+	});
 });
