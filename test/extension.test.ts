@@ -62,6 +62,18 @@ function plainText(lines: readonly string[]): string {
 }
 
 /**
+ * Writes a session directory under the agent dir holding one user message, and returns the directory.
+ * Give each message its own timestamp: a store skips timestamps it has learned before.
+ */
+function writePastSession(name: string, text: string, timestamp: number): string {
+	const dir = join(agentDir, "sessions", name);
+	mkdirSync(dir, { recursive: true });
+	const message = { role: "user", content: text, timestamp };
+	writeFileSync(join(dir, "s.jsonl"), `${JSON.stringify({ type: "message", id: "a1", parentId: null, timestamp: "", message })}\n`);
+	return dir;
+}
+
+/**
  * Calls `read` until its result matches `pattern`, or 1 s passes, and returns the last result.
  * For state that background work such as `NgramStore.open` fills in with no promise to await.
  */
@@ -144,23 +156,29 @@ describe("extension", () => {
 	});
 
 	it("turns word completion off with the command and keeps it off after a restart", async () => {
-		const first = await startSession();
-		await first.learn("the zygomorphic flower");
-		assert.match(await first.ghostFor("zygo"), /morphic/);
+		// A past session, not a live prompt: a store closed before its load finishes saves nothing,
+		// and the fake session writes no file to learn the prompt from again.
+		const pastSession = writePastSession("--restart--", "the zygomorphic flower", 1);
+		try {
+			const first = await startSession();
+			assert.match(await eventually(() => first.ghostFor("zygo"), /morphic/), /morphic/);
 
-		const notes = await first.run("off");
-		assert.deepEqual(notes, [{ message: "Word completion: off", type: "info" }]);
-		assert.doesNotMatch(await first.ghostFor("zygo"), /morphic/);
-		await first.handlers.get("session_shutdown")?.({ type: "session_shutdown" }, ctx());
+			const notes = await first.run("off");
+			assert.deepEqual(notes, [{ message: "Word completion: off", type: "info" }]);
+			assert.doesNotMatch(await first.ghostFor("zygo"), /morphic/);
+			await first.handlers.get("session_shutdown")?.({ type: "session_shutdown" }, ctx());
 
-		const second = await startSession();
-		assert.doesNotMatch(await second.ghostFor("zygo"), /morphic/);
-		await second.run("auto");
-		// Turning it on opens the store, which loads the snapshot in the background.
-		assert.match(await eventually(() => second.ghostFor("zygo"), /morphic/), /morphic/);
-		const saved: unknown = JSON.parse(readFileSync(join(agentDir, "word-completion", "settings.json"), "utf8"));
-		assert.deepEqual(saved, { method: "auto" });
-		await second.handlers.get("session_shutdown")?.({ type: "session_shutdown" }, ctx());
+			const second = await startSession();
+			assert.doesNotMatch(await second.ghostFor("zygo"), /morphic/);
+			await second.run("auto");
+			// Turning it on opens the store, which loads the snapshot in the background.
+			assert.match(await eventually(() => second.ghostFor("zygo"), /morphic/), /morphic/);
+			const saved: unknown = JSON.parse(readFileSync(join(agentDir, "word-completion", "settings.json"), "utf8"));
+			assert.deepEqual(saved, { method: "auto" });
+			await second.handlers.get("session_shutdown")?.({ type: "session_shutdown" }, ctx());
+		} finally {
+			rmSync(pastSession, { recursive: true, force: true });
+		}
 	});
 
 	it("does not learn prompts while word completion is off", async () => {
@@ -173,10 +191,7 @@ describe("extension", () => {
 	});
 
 	it("stops learning past sessions when turned off before they are read", async () => {
-		const pastSession = join(agentDir, "sessions", "--past--", "s.jsonl");
-		mkdirSync(join(pastSession, ".."), { recursive: true });
-		const message = { role: "user", content: "the hyacinthine sky", timestamp: 1 };
-		writeFileSync(pastSession, `${JSON.stringify({ type: "message", id: "a1", parentId: null, timestamp: "", message })}\n`);
+		const pastSession = writePastSession("--past--", "the hyacinthine sky", 2);
 		const snapshot = join(agentDir, "word-completion", "ngram.json");
 		try {
 			const { run, handlers } = await startSession();
@@ -185,7 +200,7 @@ describe("extension", () => {
 			await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, ctx());
 			assert.ok(!existsSync(snapshot) || !readFileSync(snapshot, "utf8").includes("hyacinthine"));
 		} finally {
-			rmSync(join(pastSession, ".."), { recursive: true, force: true });
+			rmSync(pastSession, { recursive: true, force: true });
 			saveMethod(join(agentDir, "word-completion", "settings.json"), "auto");
 		}
 	});
