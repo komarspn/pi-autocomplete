@@ -7,6 +7,18 @@ interface Continuations {
 	counts: Map<string, number>;
 }
 
+/** A word and how often it was seen. */
+export type WordCount = [word: string, count: number];
+
+/** Plain-data copy of everything an NgramBackend has learned, for saving to disk. */
+export interface NgramSnapshot {
+	unigrams: WordCount[];
+	/** Words seen after each one-word context. */
+	bigrams: [context: string, counts: WordCount[]][];
+	/** Words seen after each two-word context, keyed as `previous\0current`. */
+	trigrams: [context: string, counts: WordCount[]][];
+}
+
 const LEADING_APOSTROPHES = /^'+/;
 // Absolute discount taken from each seen count and spread over the lower order.
 const DISCOUNT = 0.75;
@@ -25,7 +37,7 @@ export class NgramBackend implements WordPredictionBackend {
 	private readonly bigrams = new Map<string, Continuations>();
 	private readonly trigrams = new Map<string, Continuations>();
 	// Every learned word, sorted, so the words under a prefix are one contiguous range.
-	private readonly vocabulary: string[] = [];
+	private vocabulary: string[] = [];
 
 	/** Learns the prose words of a submitted prompt. Slash commands and code are skipped by the prose gates. */
 	observe(text: string): void {
@@ -75,23 +87,51 @@ export class NgramBackend implements WordPredictionBackend {
 
 	feedback(_before: string, _prefix: string, _suggestion: string, _accepted: boolean): void {}
 
+	/** Everything learned so far, as plain data. */
+	snapshot(): NgramSnapshot {
+		return {
+			unigrams: [...this.unigrams],
+			bigrams: tableSnapshot(this.bigrams),
+			trigrams: tableSnapshot(this.trigrams),
+		};
+	}
+
+	/** Adds the counts of a snapshot to what this backend has learned. */
+	restore(snapshot: NgramSnapshot): void {
+		for (const [word, count] of snapshot.unigrams) {
+			this.unigrams.set(word, (this.unigrams.get(word) ?? 0) + count);
+			this.total += count;
+		}
+		// One sort instead of a splice per new word.
+		this.vocabulary = [...this.unigrams.keys()].sort();
+		for (const [context, counts] of snapshot.bigrams) {
+			for (const [word, count] of counts) countContinuation(this.bigrams, context, word, count);
+		}
+		for (const [context, counts] of snapshot.trigrams) {
+			for (const [word, count] of counts) countContinuation(this.trigrams, context, word, count);
+		}
+	}
+
 	private count(word: string): void {
 		const seen = this.unigrams.get(word);
 		this.unigrams.set(word, (seen ?? 0) + 1);
 		this.total++;
 		if (seen === undefined) this.vocabulary.splice(lowerBound(this.vocabulary, word), 0, word);
 	}
-
 }
 
-function countContinuation(table: Map<string, Continuations>, context: string, word: string): void {
+function countContinuation(table: Map<string, Continuations>, context: string, word: string, times = 1): void {
 	let continuations = table.get(context);
 	if (!continuations) {
 		continuations = { total: 0, counts: new Map() };
 		table.set(context, continuations);
 	}
-	continuations.total++;
-	continuations.counts.set(word, (continuations.counts.get(word) ?? 0) + 1);
+	continuations.total += times;
+	continuations.counts.set(word, (continuations.counts.get(word) ?? 0) + times);
+}
+
+function tableSnapshot(table: Map<string, Continuations>): [string, WordCount[]][] {
+	return [...table].map(([context, { counts }]) => [context, [...counts]]);
 }
 
 /** Discounted share of `word` after a context, plus the discounted mass spread by `lower`. */

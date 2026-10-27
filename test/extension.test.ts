@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, before, describe, it } from "node:test";
 import type { ExtensionAPI, ExtensionContext, KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import { type EditorTheme, KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS, type TUI } from "@earendil-works/pi-tui";
 import { fromPartial } from "@total-typescript/shoehorn";
@@ -8,6 +11,8 @@ import { WordCompletionEditor } from "../src/word-completion-editor.ts";
 
 type EditorFactory = Parameters<ExtensionContext["ui"]["setEditorComponent"]>[0] & {};
 type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
+
+let agentDir = "";
 
 function fakePi(handlers: Map<string, Handler>): ExtensionAPI {
 	return fromPartial<ExtensionAPI>({
@@ -22,6 +27,7 @@ function ctx(setEditorComponent: (factory: EditorFactory) => void = () => {}): E
 	return fromPartial<ExtensionContext>({
 		hasUI: true,
 		ui: { setEditorComponent, theme: { fg: (_color: string, text: string) => text } },
+		sessionManager: { getSessionDir: () => join(agentDir, "sessions", "--project--"), getSessionFile: () => undefined },
 	});
 }
 
@@ -48,6 +54,17 @@ async function startSession() {
 }
 
 describe("extension", () => {
+	// Keep the store away from the real agent directory and its sessions.
+	before(() => {
+		agentDir = mkdtempSync(join(tmpdir(), "word-completion-agent-"));
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+	});
+
+	after(() => {
+		delete process.env.PI_CODING_AGENT_DIR;
+		rmSync(agentDir, { recursive: true, force: true });
+	});
+
 	it("installs the word-completion editor on session start", async () => {
 		const { editor } = await startSession();
 		assert.ok(editor instanceof WordCompletionEditor);
