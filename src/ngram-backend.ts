@@ -30,10 +30,14 @@ const START = "";
 const START_ID = -1;
 // Trigram contexts pack two ids into one number. Both stay below 2^26, so the key stays a safe integer.
 const ID_LIMIT = 2 ** 26;
+// Weight of the web prior at the unigram level, in learned words. Same as omp's mu1.
+const PRIOR_WEIGHT = 10_000;
+// Prior words added between yields to the event loop, so adding the prior never holds up pi for long.
+const SLICE_WORDS = 2_000;
 
 /**
  * Word trigram completion learned from the prompts the user submits, with interpolated absolute
- * discounting. State is in memory only.
+ * discounting. An optional web prior smooths the unigram level. State is in memory only.
  */
 export class NgramBackend implements WordPredictionBackend {
 	// A word's id is its index here. Ids never change, so the count tables never need renumbering.
@@ -42,6 +46,11 @@ export class NgramBackend implements WordPredictionBackend {
 	/** Unigram counts, indexed by word id. */
 	private readonly unigrams: number[] = [];
 	private total = 0;
+	/** Each word's share of the web prior, indexed by word id. Zero for words the prior lacks. */
+	private readonly priors: number[] = [];
+	// Zero until a prior is in use, so the unigram level is the plain learned share.
+	private priorWeight = 0;
+	private hasPrior = false;
 	private readonly bigrams = new Map<number, Continuations>();
 	private readonly trigrams = new Map<number, Continuations>();
 	// Every word id, sorted by word, so the words under a prefix are one contiguous range.
@@ -74,7 +83,7 @@ export class NgramBackend implements WordPredictionBackend {
 		const afterCurrent = current === undefined ? undefined : this.bigrams.get(current);
 		const afterBoth =
 			previous === undefined || current === undefined ? undefined : this.trigrams.get(trigramKey(previous, current));
-		const { words, unigrams, order } = this;
+		const { words, unigrams, priors, priorWeight, order } = this;
 		let best: string | undefined;
 		let bestScore = 0;
 		let sum = 0;
@@ -82,8 +91,9 @@ export class NgramBackend implements WordPredictionBackend {
 			const id = order[i];
 			const word = id === undefined ? undefined : words[id];
 			if (id === undefined || word === undefined || !word.startsWith(lower)) break;
-			// P(word | previous current), each order interpolated with the one below.
-			const unigram = (unigrams[id] ?? 0) / this.total;
+			// P(word | previous current), each order interpolated with the one below. The unigram level is
+			// the learned count with a Dirichlet prior: (c(w) + mu * p0(w)) / (N + mu).
+			const unigram = ((unigrams[id] ?? 0) + priorWeight * (priors[id] ?? 0)) / (this.total + priorWeight);
 			const score = discounted(afterBoth, id, discounted(afterCurrent, id, unigram));
 			sum += score;
 			if (score > bestScore) {
@@ -131,7 +141,55 @@ export class NgramBackend implements WordPredictionBackend {
 			const key = trigramKey(intern(context.slice(0, split)), intern(context.slice(split + 1)));
 			for (const [word, count] of counts) countContinuation(this.trigrams, key, this.intern(word), count);
 		}
-		// One sort instead of a splice per new word.
+		this.sortOrder();
+	}
+
+	/**
+	 * Mixes web word counts, sorted by word with each word once as loadWebPrior gives them, into the
+	 * unigram level as a Dirichlet prior. Its words join the vocabulary with no learned count, so the
+	 * snapshot never holds them. Adds the words in slices that yield to the event loop; until it
+	 * resolves, completion uses learned words alone, and `observe` and `restore` stay safe to call.
+	 * Call it at most once. Rejects for a second call or an unsorted prior, before changing anything.
+	 */
+	async usePrior(prior: readonly WordCount[]): Promise<void> {
+		if (this.hasPrior) throw new Error("A web prior is already in use");
+		// Set before the first yield, so a second call made meanwhile rejects.
+		this.hasPrior = true;
+		let total = 0;
+		let previous = "";
+		for (let i = 0; i < prior.length; i++) {
+			if (i % SLICE_WORDS === SLICE_WORDS - 1) await yieldToEventLoop();
+			const [word, count] = prior[i] ?? ["", 0];
+			if (word <= previous) {
+				this.hasPrior = false;
+				throw new Error(`The web prior is not sorted at "${word}"`);
+			}
+			total += count;
+			previous = word;
+		}
+		if (total === 0) return;
+		// Ids interned here stay out of `order`, so `complete` skips them until the merge below.
+		const added: number[] = [];
+		for (let i = 0; i < prior.length; i++) {
+			if (i % SLICE_WORDS === SLICE_WORDS - 1) await yieldToEventLoop();
+			const [word, count] = prior[i] ?? ["", 0];
+			const known = this.ids.get(word);
+			const id = known ?? this.intern(word);
+			if (known === undefined) added.push(id);
+			this.priors[id] = count / total;
+		}
+		// A restore meanwhile sorted some added ids into `order`. Take them out so the merge adds each once.
+		const isAdded = new Uint8Array(this.words.length);
+		for (const id of added) isAdded[id] = 1;
+		this.order = this.mergeByWord(
+			this.order.filter((id) => isAdded[id] === 0),
+			added,
+		);
+		this.priorWeight = PRIOR_WEIGHT;
+	}
+
+	/** Rebuilds `order` after words were interned in bulk: one sort instead of a splice per new word. */
+	private sortOrder(): void {
 		this.order = [...this.ids].sort(([a], [b]) => compare(a, b)).map(([, id]) => id);
 	}
 
@@ -153,6 +211,7 @@ export class NgramBackend implements WordPredictionBackend {
 			if (id >= ID_LIMIT) throw new Error(`Vocabulary is full at ${ID_LIMIT} words`);
 			this.words.push(word);
 			this.unigrams.push(0);
+			this.priors.push(0);
 			this.ids.set(word, id);
 		}
 		return id;
@@ -169,6 +228,27 @@ export class NgramBackend implements WordPredictionBackend {
 		const word = this.words[id];
 		if (word === undefined) throw new Error(`No word has id ${id}`);
 		return word;
+	}
+
+	/** One list of the ids in `a` and `b`, which are each sorted by word. */
+	private mergeByWord(a: readonly number[], b: readonly number[]): number[] {
+		const { words } = this;
+		const merged: number[] = [];
+		let i = 0;
+		let j = 0;
+		for (;;) {
+			const left = a[i];
+			const right = b[j];
+			if (left === undefined || right === undefined) break;
+			if ((words[left] ?? "") < (words[right] ?? "")) {
+				merged.push(left);
+				i++;
+			} else {
+				merged.push(right);
+				j++;
+			}
+		}
+		return merged.concat(a.slice(i), b.slice(j));
 	}
 
 	/** Index in `order` of the first word not less than `value`. */
@@ -210,6 +290,10 @@ function discounted(continuations: Continuations | undefined, id: number, lower:
 	const { total, counts } = continuations;
 	const seen = Math.max((counts.get(id) ?? 0) - DISCOUNT, 0);
 	return (seen + DISCOUNT * counts.size * lower) / total;
+}
+
+function yieldToEventLoop(): Promise<void> {
+	return new Promise((resolve) => setImmediate(resolve));
 }
 
 function trigramKey(previous: number, current: number): number {

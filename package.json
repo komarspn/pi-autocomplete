@@ -8,7 +8,7 @@
   "pi": {
     "extensions": ["./extensions/index.ts"]
   },
-  "files": ["extensions", "src", "README.md"],
+  "files": ["extensions", "src", "data", "NOTICE", "README.md"],
   "scripts": {
     "test": "node --test \"test/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",

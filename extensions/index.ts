@@ -5,6 +5,7 @@ import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil
 import { foreignHistoryFiles, loadSeedingAnswer, readForeignPrompts, saveSeedingAnswer } from "../src/foreign-history.ts";
 import { NgramBackend } from "../src/ngram-backend.ts";
 import { NgramStore } from "../src/ngram-store.ts";
+import { loadWebPrior } from "../src/web-prior.ts";
 import { WordCompletionEditor } from "../src/word-completion-editor.ts";
 import {
 	isWordCompletionMethod,
@@ -15,7 +16,7 @@ import {
 	type WordCompletionMethod,
 } from "../src/word-completion-setting.ts";
 
-/** An n-gram backend, the store that keeps its counts, and the store's background load. */
+/** An n-gram backend, the store that keeps its counts, and the background load of both counts and prior. */
 interface Engine {
 	backend: NgramBackend;
 	store: NgramStore;
@@ -101,13 +102,24 @@ export default function wordCompletion(pi: ExtensionAPI): void {
 		const store = new NgramStore(backend, join(agentDir, "word-completion", "ngram.json"));
 		// The default sessions root, and the current session's directory in case `sessionDir` points elsewhere.
 		const sessionDirs = [join(agentDir, "sessions"), ctx.sessionManager.getSessionDir()];
+		// Cached misses from before a load would hide the words it brought.
+		const loaded = () => {
+			if (engine === started) editor?.resetWordCompletion();
+		};
 		const started: Engine = {
 			backend,
 			store,
-			opened: store.open(sessionDirs).then(() => {
-				// Cached misses from before the load would hide the words it brought back.
-				if (engine === started) editor?.resetWordCompletion();
-			}),
+			opened: Promise.all([
+				store.open(sessionDirs).then(loaded),
+				// Read per engine, not kept: the parsed file is garbage once the backend holds it. Without it,
+				// a missing or corrupt file, completion uses learned words alone.
+				loadWebPrior().then(async (prior) => {
+					if (!prior || engine !== started) return;
+					// The shipped file is sorted and this backend is new, so this does not reject.
+					await backend.usePrior(prior);
+					loaded();
+				}),
+			]).then(() => {}),
 		};
 		engine = started;
 	};

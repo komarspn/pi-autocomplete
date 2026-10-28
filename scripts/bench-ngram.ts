@@ -1,10 +1,14 @@
 // Benchmarks NgramBackend.complete on a model trained with synthetic prompts.
-// Run: node --expose-gc scripts/bench-ngram.ts [prompts]
+// Run: node --expose-gc scripts/bench-ngram.ts [prompts] [--prior]
+// --prior loads the shipped web prior first and reports its load time; the heap figure then includes it.
 // Without --expose-gc the heap figure includes garbage and varies from run to run.
 import { performance } from "node:perf_hooks";
 import { NgramBackend } from "../src/ngram-backend.ts";
+import { loadWebPrior } from "../src/web-prior.ts";
 
-const PROMPTS = Number(process.argv[2] ?? 10_000);
+const args = process.argv.slice(2);
+const PROMPTS = Number(args.find((arg) => !arg.startsWith("--")) ?? 10_000);
+const USE_PRIOR = args.includes("--prior");
 const VOCABULARY = 20_000;
 const QUERIES = 5_000;
 
@@ -52,6 +56,15 @@ function prompt(): string[] {
 const backend = new NgramBackend();
 globalThis.gc?.();
 const heapBefore = process.memoryUsage().heapUsed;
+if (USE_PRIOR) {
+	const loadStart = performance.now();
+	const prior = await loadWebPrior();
+	const loadMs = performance.now() - loadStart;
+	if (!prior) throw new Error("The web prior did not load");
+	const useStart = performance.now();
+	await backend.usePrior(prior);
+	console.log(`prior: ${prior.length} words, load ${loadMs.toFixed(0)} ms, usePrior ${(performance.now() - useStart).toFixed(0)} ms`);
+}
 const trainStart = performance.now();
 for (let i = 0; i < PROMPTS; i++) backend.observe(`${prompt().join(" ")}.`);
 const trainMs = performance.now() - trainStart;
@@ -69,17 +82,28 @@ const queries = Array.from({ length: QUERIES }, () => {
 
 for (const { before, prefix } of queries.slice(0, 500)) await backend.complete(before, prefix);
 const times: number[] = [];
+// Times by prefix length, since one- and two-letter prefixes scan the most words.
+const byLength = new Map<number, number[]>();
 let shown = 0;
 for (const { before, prefix } of queries) {
 	const start = performance.now();
 	const suffix = await backend.complete(before, prefix);
-	times.push(performance.now() - start);
+	const time = performance.now() - start;
+	times.push(time);
+	byLength.set(prefix.length, [...(byLength.get(prefix.length) ?? []), time]);
 	if (suffix) shown++;
 }
-times.sort((a, b) => a - b);
-const at = (q: number) => times[Math.min(times.length - 1, Math.floor(q * times.length))]!;
 const us = (ms: number) => `${(ms * 1000).toFixed(1)} µs`;
+const summary = (sample: number[]) => {
+	sample.sort((a, b) => a - b);
+	const at = (q: number) => sample[Math.min(sample.length - 1, Math.floor(q * sample.length))]!;
+	return `p50 ${us(at(0.5))}, p90 ${us(at(0.9))}, p99 ${us(at(0.99))}, max ${us(at(1))}`;
+};
 
 console.log(`prompts ${PROMPTS}, training ${trainMs.toFixed(0)} ms, heap +${heapMiB.toFixed(1)} MiB`);
-console.log(`complete over ${QUERIES} queries: p50 ${us(at(0.5))}, p90 ${us(at(0.9))}, p99 ${us(at(0.99))}, max ${us(at(1))}`);
+console.log(`complete over ${QUERIES} queries: ${summary(times)}`);
+for (const length of [1, 2]) {
+	const sample = byLength.get(length) ?? [];
+	console.log(`  ${length}-letter prefix, ${sample.length} queries: ${summary(sample)}`);
+}
 console.log(`ghosts shown for ${((shown / QUERIES) * 100).toFixed(1)}% of queries`);

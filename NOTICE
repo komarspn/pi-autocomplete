@@ -1,0 +1,7 @@
+This package includes word counts derived from the Google Books Ngram dataset,
+English, version 20200217, by Google Books (https://books.google.com/ngrams).
+The source data is licensed under the Creative Commons Attribution 3.0
+Unported License (https://creativecommons.org/licenses/by/3.0/). Source data
+© 2019 Google. The counts were summed over years, lowercased, stripped of
+part-of-speech tags and cut to the most frequent entries. Google does not
+endorse this package.

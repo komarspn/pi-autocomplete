@@ -86,11 +86,11 @@ function writePastSession(name: string, text: string, timestamp: number): string
 }
 
 /**
- * Calls `read` until its result matches `pattern`, or 1 s passes, and returns the last result.
- * For state that background work such as `NgramStore.open` fills in with no promise to await.
+ * Calls `read` until its result matches `pattern`, or 5 s passes, and returns the last result.
+ * For state that background work such as `NgramStore.open` and the web prior load fills in with no promise to await.
  */
 async function eventually(read: () => Promise<string>, pattern: RegExp): Promise<string> {
-	const deadline = Date.now() + 1000;
+	const deadline = Date.now() + 5000;
 	let result = await read();
 	while (!pattern.test(result) && Date.now() < deadline) {
 		await new Promise((resolve) => setTimeout(resolve, 10));

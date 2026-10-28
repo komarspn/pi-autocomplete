@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { NgramBackend } from "../src/ngram-backend.ts";
 import { NgramStore } from "../src/ngram-store.ts";
+import { loadWebPrior } from "../src/web-prior.ts";
 
 let root: string;
 let sessions: string;
@@ -99,6 +100,18 @@ describe("NgramStore", () => {
 		const second = await openStore();
 		assert.equal(await second.backend.complete("a ", "zygo"), "morphic");
 		second.store.close();
+	});
+
+	it("does not save the web prior in the snapshot", async () => {
+		const prior = await loadWebPrior();
+		assert.ok(prior);
+		const backend = new NgramBackend();
+		await backend.usePrior(prior);
+		const { store } = await openStore(backend);
+		store.observe("please look at the zygomorphic flower");
+		store.close();
+		// The prior's 150,000 words would take megabytes. One prompt takes a few hundred bytes.
+		assert.ok(statSync(snapshotPath).size < 2_000, `${statSync(snapshotPath).size} bytes`);
 	});
 
 	it("saves 5 minutes after the last change, and at most 15 minutes after the first unsaved one", async (t) => {
