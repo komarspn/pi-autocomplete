@@ -47,4 +47,4 @@ Training is slower because each new learned word is spliced into a 150,000-entry
 
 Live check, `scripts/live-check.sh "" "it was becau"`, shows `se`, and `"please expla"` shows `in`, on a fresh agent dir with no history.
 
-Open: ticket 01 asks for `NOTICE` to be linked from the README. The repo has no README yet (`package.json` lists one in `files`). `NOTICE` ships in the package now. Add the link when the README is written.
+`NOTICE` ships in the package and `README.md` links it, as ticket 01 asks.
