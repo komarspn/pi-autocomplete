@@ -1,5 +1,8 @@
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { foreignHistoryFiles, loadSeedingAnswer, readForeignPrompts, saveSeedingAnswer } from "../src/foreign-history.ts";
 import { NgramBackend } from "../src/ngram-backend.ts";
 import { NgramStore } from "../src/ngram-store.ts";
 import { WordCompletionEditor } from "../src/word-completion-editor.ts";
@@ -12,10 +15,11 @@ import {
 	type WordCompletionMethod,
 } from "../src/word-completion-setting.ts";
 
-/** An n-gram backend and the store that keeps its counts. */
+/** An n-gram backend, the store that keeps its counts, and the store's background load. */
 interface Engine {
 	backend: NgramBackend;
 	store: NgramStore;
+	opened: Promise<void>;
 }
 
 /** Pi extension factory: installs the word-completion editor when a session with a UI starts. */
@@ -25,8 +29,62 @@ export default function wordCompletion(pi: ExtensionAPI): void {
 	// which the next engine reads.
 	let engine: Engine | undefined;
 	let method: WordCompletionMethod = "auto";
+	// Set while the seeding question is open. Aborted on shutdown, which dismisses the dialog unanswered.
+	let asking: AbortController | undefined;
 
 	const settingPath = () => join(getAgentDir(), "word-completion", "settings.json");
+	const answerPath = () => join(getAgentDir(), "word-completion", "foreign-history.json");
+
+	/**
+	 * Seeds the running engine from Claude Code and Codex history once the user agrees. Asks once, and
+	 * only when one of the files exists; nothing in them is read before a yes. Never rejects.
+	 * Call it after the editor is installed: installing an editor closes any open dialog.
+	 */
+	const offerSeeding = async (ctx: ExtensionContext) => {
+		const started = engine;
+		if (!started) return;
+		let answer = loadSeedingAnswer(answerPath());
+		if (answer === "declined" || asking) return;
+		const files = foreignHistoryFiles(process.env, homedir());
+		if (answer === undefined) {
+			// Checks only that the files exist, which is no read of what the user wrote.
+			const present = files.filter((file) => existsSync(file));
+			// Without a UI, confirm answers no on its own, which must not count as the user declining.
+			if (present.length === 0 || !ctx.hasUI) return;
+			const controller = new AbortController();
+			asking = controller;
+			let agreed: boolean;
+			try {
+				agreed = await ctx.ui.confirm(
+					"Learn words from Claude Code and Codex?",
+					`Word completion can read the prompts in ${present.join(" and ")} once, to suggest the words you use. ` +
+						"Nothing is read before you agree, and nothing leaves this machine.",
+					{ signal: controller.signal },
+				);
+			} catch {
+				// No dialog could be shown. Ask again next session.
+				return;
+			} finally {
+				if (asking === controller) asking = undefined;
+			}
+			// The session ended before the user answered.
+			if (controller.signal.aborted) return;
+			answer = agreed ? "accepted" : "declined";
+			try {
+				saveSeedingAnswer(answerPath(), answer);
+			} catch (error) {
+				const reason = error instanceof Error ? error.message : String(error);
+				ctx.ui.notify(`Word completion could not save your answer and will ask again: ${reason}`, "warning");
+			}
+			if (answer === "declined") return;
+		}
+		await started.opened;
+		if (engine !== started) return;
+		// False when this snapshot already holds the history, or the store closed meanwhile.
+		if (!(await started.store.seed(() => readForeignPrompts(files)))) return;
+		// Cached misses from before seeding would hide the words it taught.
+		if (engine === started) editor?.resetWordCompletion();
+	};
 
 	/** Starts the engine when `method` needs one and stops it when off. Starting loads past counts in the background. */
 	const applyMethod = (ctx: ExtensionContext) => {
@@ -40,14 +98,18 @@ export default function wordCompletion(pi: ExtensionAPI): void {
 		const agentDir = getAgentDir();
 		// A fresh backend each time: restoring a snapshot adds its counts to what the backend holds.
 		const backend = new NgramBackend();
-		const started: Engine = { backend, store: new NgramStore(backend, join(agentDir, "word-completion", "ngram.json")) };
-		engine = started;
+		const store = new NgramStore(backend, join(agentDir, "word-completion", "ngram.json"));
 		// The default sessions root, and the current session's directory in case `sessionDir` points elsewhere.
 		const sessionDirs = [join(agentDir, "sessions"), ctx.sessionManager.getSessionDir()];
-		void started.store.open(sessionDirs).then(() => {
-			// Cached misses from before the load would hide the words it brought back.
-			if (engine === started) editor?.resetWordCompletion();
-		});
+		const started: Engine = {
+			backend,
+			store,
+			opened: store.open(sessionDirs).then(() => {
+				// Cached misses from before the load would hide the words it brought back.
+				if (engine === started) editor?.resetWordCompletion();
+			}),
+		};
+		engine = started;
 	};
 
 	pi.on("session_start", (_event, ctx) => {
@@ -60,6 +122,7 @@ export default function wordCompletion(pi: ExtensionAPI): void {
 			editor = new WordCompletionEditor(tui, theme, keybindings, { backend: engine?.backend, style });
 			return editor;
 		});
+		void offerSeeding(ctx);
 	});
 
 	pi.registerCommand("word-completion", {
@@ -83,6 +146,7 @@ export default function wordCompletion(pi: ExtensionAPI): void {
 			method = choice;
 			applyMethod(ctx);
 			editor?.setWordCompletionBackend(engine?.backend);
+			void offerSeeding(ctx);
 			try {
 				saveMethod(settingPath(), method);
 			} catch (error) {
@@ -111,6 +175,8 @@ export default function wordCompletion(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", () => {
+		asking?.abort();
+		asking = undefined;
 		engine?.store.close();
 		engine = undefined;
 	});

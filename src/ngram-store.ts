@@ -12,6 +12,8 @@ interface StoreFile {
 	offsets: Record<string, number>;
 	/** Timestamps of the user messages already learned, live or read. */
 	learned: number[];
+	/** True once the counts hold the prompts of other tools' history. Missing in snapshots saved before seeding existed. */
+	seeded?: boolean;
 }
 
 // Bump when the file shape or the meaning of the counts changes. Older files are then discarded and rebuilt.
@@ -33,6 +35,9 @@ export class NgramStore {
 	private readonly learned = new Set<number>();
 	// Saving before the snapshot is loaded would replace it with less.
 	private isLoaded = false;
+	private isSeeded = false;
+	// Apart from isSeeded, which is saved: a save during the read must not claim counts not yet learned.
+	private isSeeding = false;
 	private readonly closing = new AbortController();
 	private idleTimer: NodeJS.Timeout | undefined;
 	private maxTimer: NodeJS.Timeout | undefined;
@@ -54,6 +59,7 @@ export class NgramStore {
 			for (const [file, offset] of Object.entries(saved.offsets)) this.offsets.set(file, offset);
 			// Adds to the marks made while loading.
 			for (const timestamp of saved.learned) this.learned.add(timestamp);
+			this.isSeeded = saved.seeded === true;
 		}
 		this.isLoaded = true;
 		for (const file of await listSessionFiles(sessionDirs)) {
@@ -76,6 +82,32 @@ export class NgramStore {
 		if (this.learned.has(timestamp)) return;
 		this.learned.add(timestamp);
 		this.changed();
+	}
+
+	/**
+	 * Learns the prompts `read` returns, unless these counts already hold them. A rebuilt snapshot lost
+	 * them, so it is seeded again. Resolves to true when it learned; false before `open` resolves, after
+	 * `close`, or when `read` rejects. `read` runs only when seeding goes ahead.
+	 */
+	async seed(read: () => Promise<readonly string[]>): Promise<boolean> {
+		if (!this.isLoaded || this.isClosed || this.isSeeded || this.isSeeding) return false;
+		// Set before reading, so a second call made meanwhile does not count the prompts again.
+		this.isSeeding = true;
+		let prompts: readonly string[];
+		try {
+			prompts = await read();
+		} catch {
+			// Nothing was learned, so a later call may try again.
+			return false;
+		} finally {
+			this.isSeeding = false;
+		}
+		// Closed meanwhile: the saved snapshot says not seeded, so the next run seeds.
+		if (this.isClosed) return false;
+		for (const prompt of prompts) this.backend.observe(prompt);
+		this.isSeeded = true;
+		this.changed();
+		return true;
 	}
 
 	/** Saves unsaved changes and stops reading sessions and saving. Safe to call more than once. */
@@ -112,6 +144,7 @@ export class NgramStore {
 			ngram: this.backend.snapshot(),
 			offsets: Object.fromEntries(this.offsets),
 			learned: [...this.learned],
+			seeded: this.isSeeded,
 		};
 		const temp = `${this.path}.${process.pid}.tmp`;
 		try {
@@ -180,6 +213,7 @@ function isStoreFile(value: unknown): value is StoreFile {
 	const { unigrams, bigrams, trigrams } = value.ngram;
 	if (!isWordCounts(unigrams) || !isContextTable(bigrams) || !isContextTable(trigrams)) return false;
 	if (!isObject(value.offsets) || !Object.values(value.offsets).every(isCount)) return false;
+	if (value.seeded !== undefined && typeof value.seeded !== "boolean") return false;
 	return Array.isArray(value.learned) && value.learned.every(isCount);
 }
 

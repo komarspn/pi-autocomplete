@@ -247,6 +247,68 @@ describe("NgramStore", () => {
 		second.store.close();
 		assert.equal(await second.backend.complete("", "flori"), "culture");
 	});
+
+	it("seeds once, and not again after a restart", async () => {
+		let reads = 0;
+		const read = async () => {
+			reads++;
+			return ["please look at the zygomorphic flower"];
+		};
+		const first = await openStore();
+		assert.equal(await first.store.seed(read), true);
+		assert.equal(await first.store.seed(read), false);
+		first.store.close();
+		assert.equal(await first.backend.complete("a ", "zygo"), "morphic");
+
+		const second = await openStore();
+		assert.equal(await second.store.seed(read), false);
+		second.store.close();
+		assert.equal(reads, 1);
+		assert.deepEqual(second.backend.snapshot(), first.backend.snapshot());
+	});
+
+	it("seeds again when the snapshot is rebuilt, because its counts are gone", async () => {
+		const read = async () => ["please look at the zygomorphic flower"];
+		const first = await openStore();
+		await first.store.seed(read);
+		first.store.close();
+		writeFileSync(snapshotPath, "{oops");
+
+		const second = await openStore();
+		assert.equal(await second.store.seed(read), true);
+		second.store.close();
+		assert.deepEqual(second.backend.snapshot(), first.backend.snapshot());
+	});
+
+	it("seeds on the next run when closed while reading the history", async () => {
+		const first = await openStore();
+		// An unsaved change, so close saves while the history is still being read.
+		first.store.observe("open the pull request");
+		let finish: (prompts: string[]) => void = () => {};
+		const seeding = first.store.seed(() => new Promise((resolve) => (finish = resolve)));
+		first.store.close();
+		finish(["zygomorphic"]);
+		assert.equal(await seeding, false);
+
+		const second = await openStore();
+		assert.equal(await second.store.seed(async () => ["zygomorphic"]), true);
+		second.store.close();
+		assert.equal(await second.backend.complete("", "zygo"), "morphic");
+	});
+
+	it("does not seed before the snapshot is loaded or after closing", async () => {
+		let reads = 0;
+		const read = async () => {
+			reads++;
+			return ["zygomorphic"];
+		};
+		const unopened = new NgramStore(new NgramBackend(), snapshotPath);
+		assert.equal(await unopened.seed(read), false);
+		const { store } = await openStore();
+		store.close();
+		assert.equal(await store.seed(read), false);
+		assert.equal(reads, 0);
+	});
 });
 
 /** A backend's snapshot in a fixed order, to compare backends that learned the same text in different orders. */

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, before, describe, it } from "node:test";
+import { after, afterEach, before, describe, it } from "node:test";
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
@@ -21,6 +21,8 @@ type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
 type Command = Omit<RegisteredCommand, "name" | "sourceInfo">;
 
 let agentDir = "";
+// Stands in for the home directory of Claude Code (`.claude`) and Codex (`.codex`).
+let foreignHome = "";
 
 function fakePi(handlers: Map<string, Handler>, commands = new Map<string, Command>()): ExtensionAPI {
 	return fromPartial<ExtensionAPI>({
@@ -48,10 +50,20 @@ function commandCtx(picked?: string) {
 	return { ctx, notes };
 }
 
-function ctx(setEditorComponent: (factory: EditorFactory) => void = () => {}): ExtensionContext {
+/** Answers the seeding question. */
+type Confirm = (title: string, message: string, opts?: { signal?: AbortSignal }) => Promise<boolean>;
+
+// The extension swallows a failing confirm, so unexpected questions are counted and checked after each test.
+let unexpectedQuestions: string[] = [];
+const unexpectedConfirm: Confirm = async (title) => {
+	unexpectedQuestions.push(title);
+	return false;
+};
+
+function ctx(setEditorComponent: (factory: EditorFactory) => void = () => {}, confirm = unexpectedConfirm): ExtensionContext {
 	return fromPartial<ExtensionContext>({
 		hasUI: true,
-		ui: { setEditorComponent, theme: { fg: (_color: string, text: string) => text } },
+		ui: { setEditorComponent, confirm, notify: () => {}, theme: { fg: (_color: string, text: string) => text } },
 		sessionManager: { getSessionDir: () => join(agentDir, "sessions", "--project--"), getSessionFile: () => undefined },
 	});
 }
@@ -88,12 +100,12 @@ async function eventually(read: () => Promise<string>, pattern: RegExp): Promise
 }
 
 /** Runs the extension through session start and builds the editor it installs. */
-async function startSession() {
+async function startSession(confirm?: Confirm) {
 	const handlers = new Map<string, Handler>();
 	const commands = new Map<string, Command>();
 	let factory: EditorFactory | undefined;
 	wordCompletion(fakePi(handlers, commands));
-	await handlers.get("session_start")?.({ type: "session_start" }, ctx((f) => (factory = f)));
+	await handlers.get("session_start")?.({ type: "session_start" }, ctx((f) => (factory = f), confirm));
 	assert.ok(factory, "editor factory set");
 	const tui = fromPartial<TUI>({ terminal: { rows: 40, columns: 80 }, requestRender() {} });
 	const theme = fromPartial<EditorTheme>({ borderColor: (s: string) => s, selectList: {} });
@@ -124,11 +136,22 @@ describe("extension", () => {
 	before(() => {
 		agentDir = mkdtempSync(join(tmpdir(), "word-completion-agent-"));
 		process.env.PI_CODING_AGENT_DIR = agentDir;
+		foreignHome = mkdtempSync(join(tmpdir(), "word-completion-home-"));
+		process.env.CLAUDE_CONFIG_DIR = join(foreignHome, ".claude");
+		process.env.CODEX_HOME = join(foreignHome, ".codex");
+	});
+
+	afterEach(() => {
+		assert.deepEqual(unexpectedQuestions, [], "asked without a test expecting it");
+		unexpectedQuestions = [];
 	});
 
 	after(() => {
 		delete process.env.PI_CODING_AGENT_DIR;
+		delete process.env.CLAUDE_CONFIG_DIR;
+		delete process.env.CODEX_HOME;
 		rmSync(agentDir, { recursive: true, force: true });
+		rmSync(foreignHome, { recursive: true, force: true });
 	});
 
 	it("installs the word-completion editor on session start", async () => {
@@ -230,6 +253,105 @@ describe("extension", () => {
 			["off"],
 		);
 		await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, ctx());
+	});
+
+	describe("seeding from Claude Code and Codex history", () => {
+		const answerPath = () => join(agentDir, "word-completion", "foreign-history.json");
+		const snapshotPath = () => join(agentDir, "word-completion", "ngram.json");
+
+		before(() => {
+			mkdirSync(join(foreignHome, ".claude"), { recursive: true });
+			mkdirSync(join(foreignHome, ".codex"), { recursive: true });
+			const claude = [{ display: "the zygomorphic flower" }, { display: "/compact keep the vexillology part" }];
+			writeFileSync(join(foreignHome, ".claude", "history.jsonl"), claude.map((e) => `${JSON.stringify(e)}\n`).join(""));
+			writeFileSync(join(foreignHome, ".codex", "history.jsonl"), `${JSON.stringify({ ts: 1, text: "the floriculture notes" })}\n`);
+		});
+
+		after(() => {
+			rmSync(join(foreignHome, ".claude"), { recursive: true, force: true });
+			rmSync(join(foreignHome, ".codex"), { recursive: true, force: true });
+		});
+
+		// Each test starts unasked and with an empty model.
+		const reset = () => {
+			rmSync(answerPath(), { force: true });
+			rmSync(snapshotPath(), { force: true });
+		};
+
+		it("learns nothing until the user agrees, then learns both files", async () => {
+			reset();
+			let agree: (value: boolean) => void = () => {};
+			const asked: string[] = [];
+			const confirm: Confirm = (title, message) => {
+				asked.push(`${title} ${message}`);
+				return new Promise((resolve) => (agree = resolve));
+			};
+			const { ghostFor, handlers } = await startSession(confirm);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			assert.equal(asked.length, 1);
+			assert.match(asked[0]!, /\.claude.history\.jsonl.*\.codex.history\.jsonl/s);
+			assert.doesNotMatch(await ghostFor("zygo"), /morphic/);
+
+			agree(true);
+			assert.match(await eventually(() => ghostFor("zygo"), /morphic/), /morphic/);
+			assert.match(await ghostFor("flori"), /culture/);
+			assert.doesNotMatch(await ghostFor("vexi"), /llology/, "slash command not learned");
+			await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, ctx());
+			assert.deepEqual(JSON.parse(readFileSync(answerPath(), "utf8")), { answer: "accepted" });
+
+			// The next run neither asks nor counts the history again.
+			const counts = readFileSync(snapshotPath(), "utf8");
+			const second = await startSession();
+			assert.match(await eventually(() => second.ghostFor("zygo"), /morphic/), /morphic/);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			await second.handlers.get("session_shutdown")?.({ type: "session_shutdown" }, ctx());
+			assert.equal(readFileSync(snapshotPath(), "utf8"), counts);
+		});
+
+		it("remembers a decline and does not ask again", async () => {
+			reset();
+			let asked = 0;
+			const first = await startSession(async () => {
+				asked++;
+				return false;
+			});
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			assert.doesNotMatch(await first.ghostFor("zygo"), /morphic/);
+			await first.handlers.get("session_shutdown")?.({ type: "session_shutdown" }, ctx());
+			assert.equal(asked, 1);
+			assert.deepEqual(JSON.parse(readFileSync(answerPath(), "utf8")), { answer: "declined" });
+
+			const second = await startSession();
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			assert.doesNotMatch(await second.ghostFor("zygo"), /morphic/);
+			await second.handlers.get("session_shutdown")?.({ type: "session_shutdown" }, ctx());
+		});
+
+		it("does not save an answer when the session ends while asking", async () => {
+			reset();
+			let signal: AbortSignal | undefined;
+			const { handlers } = await startSession((_title, _message, opts) => {
+				signal = opts?.signal;
+				return new Promise((resolve) => signal?.addEventListener("abort", () => resolve(false)));
+			});
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, ctx());
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			assert.ok(signal?.aborted);
+			assert.ok(!existsSync(answerPath()));
+		});
+
+		it("does not ask while word completion is off", async () => {
+			reset();
+			saveMethod(join(agentDir, "word-completion", "settings.json"), "off");
+			try {
+				const { handlers } = await startSession();
+				await new Promise((resolve) => setTimeout(resolve, 50));
+				await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, ctx());
+			} finally {
+				saveMethod(join(agentDir, "word-completion", "settings.json"), "auto");
+			}
+		});
 	});
 
 	it("does nothing without a UI", async () => {
