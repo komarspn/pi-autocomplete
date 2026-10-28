@@ -1,5 +1,6 @@
 // Benchmarks NgramBackend.complete on a model trained with synthetic prompts.
-// Run: node scripts/bench-ngram.ts [prompts]
+// Run: node --expose-gc scripts/bench-ngram.ts [prompts]
+// Without --expose-gc the heap figure includes garbage and varies from run to run.
 import { performance } from "node:perf_hooks";
 import { NgramBackend } from "../src/ngram-backend.ts";
 
@@ -49,10 +50,12 @@ function prompt(): string[] {
 }
 
 const backend = new NgramBackend();
+globalThis.gc?.();
 const heapBefore = process.memoryUsage().heapUsed;
 const trainStart = performance.now();
 for (let i = 0; i < PROMPTS; i++) backend.observe(`${prompt().join(" ")}.`);
 const trainMs = performance.now() - trainStart;
+globalThis.gc?.();
 const heapMiB = (process.memoryUsage().heapUsed - heapBefore) / 2 ** 20;
 
 // Queries from unseen prompts: a random cut, with a 1 to 4 letter prefix of the next word.

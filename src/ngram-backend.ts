@@ -1,10 +1,10 @@
 import { proseRuns } from "./prose-gate.ts";
 import type { WordPredictionBackend } from "./word-completion-provider.ts";
 
-/** Counts of the words seen after one context. */
+/** Counts of the words seen after one context, keyed by word id. */
 interface Continuations {
 	total: number;
-	counts: Map<string, number>;
+	counts: Map<number, number>;
 }
 
 /** A word and how often it was seen. */
@@ -26,30 +26,38 @@ const DISCOUNT = 0.75;
 const SHOW_THRESHOLD = 0.15;
 // Marks the start of a run of words. No word is empty, so it cannot collide.
 const START = "";
+// Id of START in the context tables. Word ids start at 0.
+const START_ID = -1;
+// Trigram contexts pack two ids into one number. Both stay below 2^26, so the key stays a safe integer.
+const ID_LIMIT = 2 ** 26;
 
 /**
  * Word trigram completion learned from the prompts the user submits, with interpolated absolute
  * discounting. State is in memory only.
  */
 export class NgramBackend implements WordPredictionBackend {
-	private readonly unigrams = new Map<string, number>();
+	// A word's id is its index here. Ids never change, so the count tables never need renumbering.
+	private readonly words: string[] = [];
+	private readonly ids = new Map<string, number>();
+	/** Unigram counts, indexed by word id. */
+	private readonly unigrams: number[] = [];
 	private total = 0;
-	private readonly bigrams = new Map<string, Continuations>();
-	private readonly trigrams = new Map<string, Continuations>();
-	// Every learned word, sorted, so the words under a prefix are one contiguous range.
-	private vocabulary: string[] = [];
+	private readonly bigrams = new Map<number, Continuations>();
+	private readonly trigrams = new Map<number, Continuations>();
+	// Every word id, sorted by word, so the words under a prefix are one contiguous range.
+	private order: number[] = [];
 
 	/** Learns the prose words of a submitted prompt. Slash commands and code are skipped by the prose gates. */
 	observe(text: string): void {
 		for (const run of proseRuns(text)) {
-			let previous = START;
-			let current = START;
+			let previous = START_ID;
+			let current = START_ID;
 			for (const word of run) {
-				this.count(word);
-				countContinuation(this.bigrams, current, word);
-				if (current !== START) countContinuation(this.trigrams, trigramKey(previous, current), word);
+				const id = this.count(word);
+				countContinuation(this.bigrams, current, id);
+				if (current !== START_ID) countContinuation(this.trigrams, trigramKey(previous, current), id);
 				previous = current;
-				current = word;
+				current = id;
 			}
 		}
 	}
@@ -62,19 +70,21 @@ export class NgramBackend implements WordPredictionBackend {
 		// Learned words have no edge apostrophes; the suffix still goes after the whole prefix.
 		const lower = prefix.replace(LEADING_APOSTROPHES, "").toLowerCase();
 		if (!lower) return null;
-		const [previous, current] = contextOf(before);
-		const afterCurrent = this.bigrams.get(current);
-		const afterBoth = this.trigrams.get(trigramKey(previous, current));
-		const vocabulary = this.vocabulary;
+		const [previous, current] = contextOf(before).map((word) => this.idOf(word));
+		const afterCurrent = current === undefined ? undefined : this.bigrams.get(current);
+		const afterBoth =
+			previous === undefined || current === undefined ? undefined : this.trigrams.get(trigramKey(previous, current));
+		const { words, unigrams, order } = this;
 		let best: string | undefined;
 		let bestScore = 0;
 		let sum = 0;
-		for (let i = lowerBound(vocabulary, lower); i < vocabulary.length; i++) {
-			const word = vocabulary[i];
-			if (word === undefined || !word.startsWith(lower)) break;
+		for (let i = this.lowerBound(lower); i < order.length; i++) {
+			const id = order[i];
+			const word = id === undefined ? undefined : words[id];
+			if (id === undefined || word === undefined || !word.startsWith(lower)) break;
 			// P(word | previous current), each order interpolated with the one below.
-			const unigram = (this.unigrams.get(word) ?? 0) / this.total;
-			const score = discounted(afterBoth, word, discounted(afterCurrent, word, unigram));
+			const unigram = (unigrams[id] ?? 0) / this.total;
+			const score = discounted(afterBoth, id, discounted(afterCurrent, id, unigram));
 			sum += score;
 			if (score > bestScore) {
 				best = word;
@@ -89,61 +99,126 @@ export class NgramBackend implements WordPredictionBackend {
 
 	/** Everything learned so far, as plain data. */
 	snapshot(): NgramSnapshot {
+		const unigrams: WordCount[] = [];
+		// Words known only as context, from an inconsistent snapshot, have no count to save.
+		this.unigrams.forEach((count, id) => {
+			if (count > 0) unigrams.push([this.wordOf(id), count]);
+		});
 		return {
-			unigrams: [...this.unigrams],
-			bigrams: tableSnapshot(this.bigrams),
-			trigrams: tableSnapshot(this.trigrams),
+			unigrams,
+			bigrams: this.tableSnapshot(this.bigrams, (id) => this.wordOf(id)),
+			trigrams: this.tableSnapshot(this.trigrams, (key) => {
+				const current = key % ID_LIMIT;
+				return `${this.wordOf((key - current) / ID_LIMIT - 1)}\0${this.wordOf(current)}`;
+			}),
 		};
 	}
 
 	/** Adds the counts of a snapshot to what this backend has learned. */
 	restore(snapshot: NgramSnapshot): void {
+		const intern = (word: string): number => (word === START ? START_ID : this.intern(word));
 		for (const [word, count] of snapshot.unigrams) {
-			this.unigrams.set(word, (this.unigrams.get(word) ?? 0) + count);
+			const id = this.intern(word);
+			this.unigrams[id] = (this.unigrams[id] ?? 0) + count;
 			this.total += count;
 		}
-		// One sort instead of a splice per new word.
-		this.vocabulary = [...this.unigrams.keys()].sort();
 		for (const [context, counts] of snapshot.bigrams) {
-			for (const [word, count] of counts) countContinuation(this.bigrams, context, word, count);
+			const contextId = intern(context);
+			for (const [word, count] of counts) countContinuation(this.bigrams, contextId, this.intern(word), count);
 		}
 		for (const [context, counts] of snapshot.trigrams) {
-			for (const [word, count] of counts) countContinuation(this.trigrams, context, word, count);
+			const split = context.indexOf("\0");
+			const key = trigramKey(intern(context.slice(0, split)), intern(context.slice(split + 1)));
+			for (const [word, count] of counts) countContinuation(this.trigrams, key, this.intern(word), count);
 		}
+		// One sort instead of a splice per new word.
+		this.order = [...this.ids].sort(([a], [b]) => compare(a, b)).map(([, id]) => id);
 	}
 
-	private count(word: string): void {
-		const seen = this.unigrams.get(word);
-		this.unigrams.set(word, (seen ?? 0) + 1);
+	/** Counts one occurrence of `word` and returns its id, keeping `order` sorted when the word is new. */
+	private count(word: string): number {
+		const known = this.ids.get(word);
+		const id = known ?? this.intern(word);
+		this.unigrams[id] = (this.unigrams[id] ?? 0) + 1;
 		this.total++;
-		if (seen === undefined) this.vocabulary.splice(lowerBound(this.vocabulary, word), 0, word);
+		if (known === undefined) this.order.splice(this.lowerBound(word), 0, id);
+		return id;
+	}
+
+	/** The id of `word`, adding it with a zero count when new. Does not touch `order`. */
+	private intern(word: string): number {
+		let id = this.ids.get(word);
+		if (id === undefined) {
+			id = this.words.length;
+			if (id >= ID_LIMIT) throw new Error(`Vocabulary is full at ${ID_LIMIT} words`);
+			this.words.push(word);
+			this.unigrams.push(0);
+			this.ids.set(word, id);
+		}
+		return id;
+	}
+
+	/** The id of a context word: START_ID for START, undefined for a word never learned. */
+	private idOf(word: string): number | undefined {
+		return word === START ? START_ID : this.ids.get(word);
+	}
+
+	/** The word with `id`, or START for START_ID. */
+	private wordOf(id: number): string {
+		if (id === START_ID) return START;
+		const word = this.words[id];
+		if (word === undefined) throw new Error(`No word has id ${id}`);
+		return word;
+	}
+
+	/** Index in `order` of the first word not less than `value`. */
+	private lowerBound(value: string): number {
+		const { words, order } = this;
+		let low = 0;
+		let high = order.length;
+		while (low < high) {
+			const mid = (low + high) >>> 1;
+			const id = order[mid];
+			const word = id === undefined ? undefined : words[id];
+			if (word !== undefined && word < value) low = mid + 1;
+			else high = mid;
+		}
+		return low;
+	}
+
+	private tableSnapshot(table: Map<number, Continuations>, contextOf: (key: number) => string): [string, WordCount[]][] {
+		return [...table].map(([key, { counts }]) => [
+			contextOf(key),
+			[...counts].map(([id, count]): WordCount => [this.wordOf(id), count]),
+		]);
 	}
 }
 
-function countContinuation(table: Map<string, Continuations>, context: string, word: string, times = 1): void {
+function countContinuation(table: Map<number, Continuations>, context: number, id: number, times = 1): void {
 	let continuations = table.get(context);
 	if (!continuations) {
 		continuations = { total: 0, counts: new Map() };
 		table.set(context, continuations);
 	}
 	continuations.total += times;
-	continuations.counts.set(word, (continuations.counts.get(word) ?? 0) + times);
+	continuations.counts.set(id, (continuations.counts.get(id) ?? 0) + times);
 }
 
-function tableSnapshot(table: Map<string, Continuations>): [string, WordCount[]][] {
-	return [...table].map(([context, { counts }]) => [context, [...counts]]);
-}
-
-/** Discounted share of `word` after a context, plus the discounted mass spread by `lower`. */
-function discounted(continuations: Continuations | undefined, word: string, lower: number): number {
+/** Discounted share of word `id` after a context, plus the discounted mass spread by `lower`. */
+function discounted(continuations: Continuations | undefined, id: number, lower: number): number {
 	if (!continuations) return lower;
 	const { total, counts } = continuations;
-	const seen = Math.max((counts.get(word) ?? 0) - DISCOUNT, 0);
+	const seen = Math.max((counts.get(id) ?? 0) - DISCOUNT, 0);
 	return (seen + DISCOUNT * counts.size * lower) / total;
 }
 
-function trigramKey(previous: string, current: string): string {
-	return `${previous}\0${current}`;
+function trigramKey(previous: number, current: number): number {
+	return (previous + 1) * ID_LIMIT + current;
+}
+
+/** Orders words the way `<` does, by UTF-16 code units, which is the order `lowerBound` searches. */
+function compare(a: string, b: string): number {
+	return a < b ? -1 : a > b ? 1 : 0;
 }
 
 /** The last two words of the run the cursor continues, padded with START. */
@@ -152,17 +227,4 @@ function contextOf(before: string): [string, string] {
 	const run = proseRuns(before.slice(before.lastIndexOf("\n") + 1)).at(-1) ?? [];
 	const words = [START, START, ...run.slice(-2)];
 	return [words.at(-2) ?? START, words.at(-1) ?? START];
-}
-
-/** Index of the first item not less than `value`. */
-function lowerBound(sorted: readonly string[], value: string): number {
-	let low = 0;
-	let high = sorted.length;
-	while (low < high) {
-		const mid = (low + high) >>> 1;
-		const item = sorted[mid];
-		if (item !== undefined && item < value) low = mid + 1;
-		else high = mid;
-	}
-	return low;
 }

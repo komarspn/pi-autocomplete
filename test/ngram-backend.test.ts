@@ -1,6 +1,56 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { NgramBackend } from "../src/ngram-backend.ts";
+import { NgramBackend, type NgramSnapshot, type WordCount } from "../src/ngram-backend.ts";
+
+// Saved by the backend that kept its counts in Maps keyed by word strings, with the completions it gave.
+const MAP_ERA_SNAPSHOT: NgramSnapshot = {
+	unigrams: [
+		["open", 3], ["the", 7], ["pull", 4], ["request", 3], ["run", 3], ["full", 3], ["test", 3], ["suite", 3],
+		["write", 3], ["a", 3], ["summary", 3], ["please", 2], ["summarize", 2], ["then", 1], ["zygomorphic", 1],
+		["flower", 1],
+	],
+	bigrams: [
+		["", [["open", 3], ["run", 3], ["write", 3], ["please", 2], ["then", 1]]],
+		["open", [["the", 3]]],
+		["the", [["pull", 3], ["full", 3], ["zygomorphic", 1]]],
+		["pull", [["request", 3], ["the", 1]]],
+		["run", [["the", 3]]],
+		["full", [["test", 3]]],
+		["test", [["suite", 3]]],
+		["write", [["a", 3]]],
+		["a", [["summary", 3]]],
+		["please", [["summarize", 2]]],
+		["then", [["pull", 1]]],
+		["zygomorphic", [["flower", 1]]],
+	],
+	trigrams: [
+		["\0open", [["the", 3]]],
+		["open\0the", [["pull", 3]]],
+		["the\0pull", [["request", 3]]],
+		["\0run", [["the", 3]]],
+		["run\0the", [["full", 3]]],
+		["the\0full", [["test", 3]]],
+		["full\0test", [["suite", 3]]],
+		["\0write", [["a", 3]]],
+		["write\0a", [["summary", 3]]],
+		["\0please", [["summarize", 2]]],
+		["\0then", [["pull", 1]]],
+		["then\0pull", [["the", 1]]],
+		["pull\0the", [["zygomorphic", 1]]],
+		["the\0zygomorphic", [["flower", 1]]],
+	],
+};
+const MAP_ERA_COMPLETIONS: [before: string, prefix: string, suffix: string][] = [
+	["open the ", "pu", "ll"],
+	["run the ", "fu", "ll"],
+	["write a ", "sum", "mary"],
+	["please ", "sum", "marize"],
+	["", "zygo", "morphic"],
+	["", "p", "lease"],
+	["the ", "r", "equest"],
+	["pull the ", "z", "ygomorphic"],
+	["", "t", "he"],
+];
 
 describe("NgramBackend", () => {
 	it("completes a word learned from an observed prompt", async () => {
@@ -75,6 +125,34 @@ describe("NgramBackend", () => {
 		const again = await Promise.all(queries.map(([before, prefix]) => backend.complete(before, prefix)));
 		assert.deepEqual(again, first);
 		assert.equal(await backend.complete("", "zygo"), null);
+	});
+
+	it("loads a snapshot saved by the Map-based backend and gives the same completions", async () => {
+		const backend = new NgramBackend();
+		backend.restore(MAP_ERA_SNAPSHOT);
+		for (const [before, prefix, suffix] of MAP_ERA_COMPLETIONS) {
+			assert.equal(await backend.complete(before, prefix), suffix, `${before}|${prefix}`);
+		}
+		assert.deepEqual(backend.snapshot(), MAP_ERA_SNAPSHOT);
+	});
+
+	it("counts every word under a prefix when words arrive out of order, live and restored", async () => {
+		const backend = new NgramBackend();
+		const unigrams: WordCount[] = [["cow", 1], ["cat", 1], ["dog", 1], ["bee", 1], ["cup", 1]];
+		backend.restore({ unigrams, bigrams: [], trigrams: [] });
+		// Live words land before, between, and after the restored ones.
+		for (const word of ["cry", "ant", "cab", "zoo", "cod", "cog", "eel", "cot"]) backend.observe(word);
+		// Eight equally likely words under "c" leave the best at 0.125, below 0.15. Losing any one would show a ghost.
+		assert.equal(await backend.complete("", "c"), null);
+		backend.observe("cub");
+		backend.observe("cub");
+		assert.equal(await backend.complete("", "c"), "ub");
+		const others: [prefix: string, suffix: string][] = [
+			["a", "nt"], ["b", "ee"], ["d", "og"], ["e", "el"], ["z", "oo"], ["cr", "y"],
+		];
+		for (const [prefix, suffix] of others) {
+			assert.equal(await backend.complete("", prefix), suffix, prefix);
+		}
 	});
 
 	it("does not extend a prefix that is itself the likeliest word", async () => {
