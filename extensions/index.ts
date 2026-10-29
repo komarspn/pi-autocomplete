@@ -37,6 +37,21 @@ export default function wordCompletion(pi: ExtensionAPI): void {
 	const settingPath = () => join(getAgentDir(), "word-completion", "settings.json");
 	const answerPath = () => join(getAgentDir(), "word-completion", "foreign-history.json");
 
+	/** Drops cached ghosts only for changes to the engine still answering the editor. */
+	const changed = (started: Engine) => {
+		if (engine === started) editor?.resetWordCompletion();
+	};
+
+	/** Retires the engine before closing its store, then detaches it from the editor. */
+	const stopEngine = () => {
+		const stopped = engine;
+		if (!stopped) return;
+		engine = undefined;
+		// Closing also stops reading past sessions and saves what was learned so far.
+		stopped.store.close();
+		editor?.setWordCompletionBackend(undefined);
+	};
+
 	/**
 	 * Seeds the running engine from Claude Code and Codex history once the user agrees. Asks once, and
 	 * only when one of the files exists; nothing in them is read before a yes. Never rejects.
@@ -84,16 +99,13 @@ export default function wordCompletion(pi: ExtensionAPI): void {
 		if (engine !== started) return;
 		// False when this snapshot already holds the history, or the store closed meanwhile.
 		if (!(await started.store.seed(() => readForeignPrompts(files)))) return;
-		// Cached misses from before seeding would hide the words it taught.
-		if (engine === started) editor?.resetWordCompletion();
+		changed(started);
 	};
 
 	/** Starts the engine when `method` needs one and stops it when off. Starting loads past counts in the background. */
 	const applyMethod = (ctx: ExtensionContext) => {
 		if (resolveMethod(method) === undefined) {
-			// Closing also stops reading past sessions, and saves what was learned so far.
-			engine?.store.close();
-			engine = undefined;
+			stopEngine();
 			return;
 		}
 		if (engine) return;
@@ -103,12 +115,9 @@ export default function wordCompletion(pi: ExtensionAPI): void {
 		const store = new NgramStore(backend, join(agentDir, "word-completion", "ngram.json"));
 		// The default sessions root, and the current session's directory in case `sessionDir` points elsewhere.
 		const sessionDirs = [join(agentDir, "sessions"), ctx.sessionManager.getSessionDir()];
-		// Cached misses from before a load would hide the words it brought.
-		const loaded = () => {
-			if (engine === started) editor?.resetWordCompletion();
-		};
-		const started: Engine = { backend, store, opened: store.open(sessionDirs).then(loaded) };
+		const started: Engine = { backend, store, opened: store.open(sessionDirs).then(() => changed(started)) };
 		engine = started;
+		editor?.setWordCompletionBackend(backend);
 		// Read per engine, not kept: the parsed file is garbage once the backend holds it. Without it,
 		// a missing or corrupt file, completion uses learned words alone. Seeding does not wait for it:
 		// usePrior is safe beside learning, and the 500,000 pairs take a while.
@@ -116,13 +125,13 @@ export default function wordCompletion(pi: ExtensionAPI): void {
 			if (!prior || engine !== started) return;
 			// The shipped file is sorted and this backend is new, so this does not reject.
 			await backend.usePrior(prior);
-			loaded();
+			changed(started);
 		});
 		// Read per engine for the same reason. Without it, a word outside the prior needs two uses.
 		void loadDictionary().then((words) => {
 			if (!words || engine !== started) return;
 			backend.useDictionary(words);
-			loaded();
+			changed(started);
 		});
 	};
 
@@ -159,7 +168,6 @@ export default function wordCompletion(pi: ExtensionAPI): void {
 			}
 			method = choice;
 			applyMethod(ctx);
-			editor?.setWordCompletionBackend(engine?.backend);
 			void offerSeeding(ctx);
 			try {
 				saveMethod(settingPath(), method);
@@ -177,8 +185,7 @@ export default function wordCompletion(pi: ExtensionAPI): void {
 	pi.on("input", (event) => {
 		if (event.source !== "interactive" || !engine) return;
 		engine.store.observe(event.text);
-		// Cached misses from before this prompt would hide the words it taught.
-		editor?.resetWordCompletion();
+		changed(engine);
 	});
 
 	// pi runs this handler before it appends the message to the session file. Marking every user
@@ -191,7 +198,6 @@ export default function wordCompletion(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", () => {
 		asking?.abort();
 		asking = undefined;
-		engine?.store.close();
-		engine = undefined;
+		stopEngine();
 	});
 }

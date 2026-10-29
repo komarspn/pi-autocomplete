@@ -77,7 +77,7 @@ export class NgramBackend implements WordPredictionBackend {
 	private readonly folded: number[] = [];
 	private total = 0;
 	/** Each word's share of the web prior, indexed by word id. Zero for words the prior lacks. */
-	private readonly priors: number[] = [];
+	private priors: number[] = [];
 	// Zero until a prior is in use, so the unigram level is the plain learned share.
 	private priorWeight = 0;
 	// The web share of TRUSTED_WEB_COUNT. Infinite until a prior is in use, so no share reaches it.
@@ -227,6 +227,8 @@ export class NgramBackend implements WordPredictionBackend {
 		if (total === 0) return;
 		// Ids interned here stay out of `order`, so `complete` skips them until the merge below.
 		const added: number[] = [];
+		// Eligibility and slip folding must not see shares before the whole prior is ready.
+		const priors: number[] = [];
 		// The id of each prior word, by its index in `prior.words`.
 		const idOf = new Int32Array(prior.words.length);
 		for (let i = 0; i < prior.words.length; i++) {
@@ -236,7 +238,7 @@ export class NgramBackend implements WordPredictionBackend {
 			const id = known ?? this.intern(word);
 			if (known === undefined) added.push(id);
 			idOf[i] = id;
-			this.priors[id] = count / total;
+			priors[id] = count / total;
 		}
 		// Built aside and swapped in with the merge, so `complete` never sees part of the pairs.
 		const { contexts, starts, words: rowWords, counts } = prior.pairs;
@@ -271,6 +273,7 @@ export class NgramBackend implements WordPredictionBackend {
 			this.order.filter((id) => isAdded[id] === 0),
 			added,
 		);
+		this.priors = priors;
 		this.priorWeight = PRIOR_WEIGHT;
 		this.trustedShare = TRUSTED_WEB_COUNT / total;
 		this.webPairs = webPairs;
@@ -361,7 +364,6 @@ export class NgramBackend implements WordPredictionBackend {
 			this.words.push(word);
 			this.unigrams.push(0);
 			this.folded.push(0);
-			this.priors.push(0);
 			this.ids.set(word, id);
 		}
 		return id;

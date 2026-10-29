@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, afterEach, before, describe, it } from "node:test";
+import { after, afterEach, before, describe, it, mock } from "node:test";
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
@@ -12,9 +12,29 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { type EditorTheme, KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS, type TUI } from "@earendil-works/pi-tui";
 import { fromPartial } from "@total-typescript/shoehorn";
-import wordCompletion from "../extensions/index.ts";
+import * as dictionary from "../src/dictionary.ts";
+import { NgramBackend } from "../src/ngram-backend.ts";
+import { NgramStore } from "../src/ngram-store.ts";
+import * as webPrior from "../src/web-prior.ts";
 import { WordCompletionEditor } from "../src/word-completion-editor.ts";
 import { saveMethod } from "../src/word-completion-setting.ts";
+
+// Real loaders by default; lifecycle tests control their completion without changing production interfaces.
+const loaders = { prior: webPrior.loadWebPrior, dictionary: dictionary.loadDictionary };
+mock.module("../src/web-prior.ts", {
+	namedExports: { ...webPrior, loadWebPrior: () => loaders.prior() },
+});
+mock.module("../src/dictionary.ts", {
+	namedExports: { ...dictionary, loadDictionary: () => loaders.dictionary() },
+});
+const { default: wordCompletion } = await import("../extensions/index.ts");
+
+/** A background operation whose completion the test controls. */
+function deferred<T>() {
+	let resolve: (value: T) => void = () => {};
+	const promise = new Promise<T>((done) => (resolve = done));
+	return { promise, resolve };
+}
 
 type EditorFactory = Parameters<ExtensionContext["ui"]["setEditorComponent"]>[0] & {};
 type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
@@ -230,6 +250,92 @@ describe("extension", () => {
 			saveMethod(join(agentDir, "word-completion", "settings.json"), "auto");
 		}
 	});
+
+	for (const source of ["open", "prior", "dictionary"] as const) {
+		it(`ignores an old ${source} completion after off then on`, async (t) => {
+			const opened = deferred<void>();
+			const prior = deferred<webPrior.WebPrior | undefined>();
+			const words = deferred<ReadonlySet<string> | undefined>();
+			const open = t.mock.method(NgramStore.prototype, "open", async () => {});
+			const loadPrior = t.mock.method(loaders, "prior", async () => undefined);
+			const loadDictionary = t.mock.method(loaders, "dictionary", async () => undefined);
+			if (source === "open") open.mock.mockImplementationOnce(() => opened.promise);
+			if (source === "prior") loadPrior.mock.mockImplementationOnce(() => prior.promise);
+			if (source === "dictionary") loadDictionary.mock.mockImplementationOnce(() => words.promise);
+			const close = t.mock.method(NgramStore.prototype, "close");
+			const installPrior = t.mock.method(NgramBackend.prototype, "usePrior");
+			const installDictionary = t.mock.method(NgramBackend.prototype, "useDictionary");
+			const session = await startSession();
+			t.after(() => session.handlers.get("session_shutdown")?.({}, ctx()));
+			await session.learn("xerophytic xerophytic");
+			assert.match(await session.ghostFor("xero"), /phytic/);
+			await session.run("off");
+			assert.equal(close.mock.callCount(), 1, "old store closes immediately");
+			await session.run("auto");
+			assert.equal(open.mock.callCount(), 2);
+			assert.notEqual(open.mock.calls[0]?.this, open.mock.calls[1]?.this, "new store for the new engine");
+			assert.doesNotMatch(await session.ghostFor("xero"), /phytic/, "new backend without old in-memory counts");
+			await session.learn("the zygomorphic flower, a zygomorphic one");
+			assert.match(await session.ghostFor("zygo"), /morphic/);
+			const reset = t.mock.method(session.editor, "resetWordCompletion");
+			opened.resolve();
+			prior.resolve({ words: [["aardvark", 1]], sentences: 0, pairs: webPrior.noPairs() });
+			words.resolve(new Set(["aardvark"]));
+			await new Promise((resolve) => setImmediate(resolve));
+			assert.equal(reset.mock.callCount(), 0, "stale work cannot invalidate the current ghost");
+			assert.equal(installPrior.mock.callCount(), 0, "stale prior is not installed");
+			assert.equal(installDictionary.mock.callCount(), 0, "stale dictionary is not installed");
+			assert.match(plainText(session.editor.render(40)), /morphic/);
+		});
+	}
+
+	for (const transition of ["off then on", "shutdown"] as const) {
+		it(`ignores an in-flight prior installation after ${transition}`, async (t) => {
+			const installing = deferred<void>();
+			const finish = deferred<void>();
+			t.mock.method(NgramStore.prototype, "open", async () => {});
+			t.mock.method(loaders, "prior", async () => ({
+				words: [["aardvark", 1]], sentences: 0, pairs: webPrior.noPairs(),
+			}));
+			t.mock.method(loaders, "dictionary", async () => undefined);
+			const usePrior = NgramBackend.prototype.usePrior;
+			const install = t.mock.method(
+				NgramBackend.prototype, "usePrior", async function (this: NgramBackend, prior: webPrior.WebPrior) {
+					installing.resolve();
+					await finish.promise;
+					await usePrior.call(this, prior);
+				},
+			);
+			const close = t.mock.method(NgramStore.prototype, "close");
+			const session = await startSession();
+			t.after(() => session.handlers.get("session_shutdown")?.({}, ctx()));
+			await installing.promise;
+			await session.learn("the zygomorphic flower, a zygomorphic one");
+			assert.match(await session.ghostFor("zygo"), /morphic/);
+			if (transition === "off then on") {
+				await session.run("off");
+				t.mock.method(loaders, "prior", async () => undefined);
+				await session.run("auto");
+				await session.learn("the zygomorphic flower, a zygomorphic one");
+				assert.match(await session.ghostFor("zygo"), /morphic/);
+			} else {
+				await session.handlers.get("session_shutdown")?.({}, ctx());
+			}
+			assert.equal(close.mock.callCount(), 1);
+			const reset = t.mock.method(session.editor, "resetWordCompletion");
+			finish.resolve();
+			await install.mock.calls[0]?.result;
+			await new Promise((resolve) => setImmediate(resolve));
+			assert.equal(reset.mock.callCount(), 0, "installation must recheck engine identity after awaiting");
+			if (transition === "off then on") {
+				assert.match(plainText(session.editor.render(40)), /morphic/);
+			} else {
+				assert.doesNotMatch(plainText(session.editor.render(40)), /morphic/, "shutdown detaches the old backend");
+				await session.handlers.get("session_shutdown")?.({}, ctx());
+				assert.equal(close.mock.callCount(), 1, "shutdown is idempotent");
+			}
+		});
+	}
 
 	it("picks the method from a list when the command has no argument", async () => {
 		const { run, handlers } = await startSession();

@@ -10,7 +10,7 @@
   },
   "files": ["extensions", "src", "data", "NOTICE", "README.md"],
   "scripts": {
-    "test": "node --test \"test/**/*.test.ts\"",
+    "test": "node --experimental-test-module-mocks --test \"test/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "prepare": "husky"
   },

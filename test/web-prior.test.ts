@@ -193,6 +193,45 @@ describe("NgramBackend with the web prior", () => {
 		assert.equal(await backend.complete("", "quix"), "otic");
 	});
 
+	it("keeps prior eligibility hidden throughout installation", async () => {
+		const backend = new NgramBackend();
+		backend.observe("aardvark");
+		const filler: WordCount[] = Array.from({ length: 5_000 }, (_, i) => [`z${String(i).padStart(4, "0")}`, 1]);
+		let done = false;
+		const adding = backend.usePrior(wordsOnly([["aardvark", 1], ...filler])).then(() => (done = true));
+		const during: Array<string | null> = [];
+		while (!done) {
+			during.push(await backend.complete("", "aard"));
+			await new Promise((resolve) => setImmediate(resolve));
+		}
+		await adding;
+		assert.ok(during.length > 1, "checked across event-loop yields");
+		assert.ok(during.every((suffix) => suffix === null), "one learned use stays hidden until publication");
+		assert.equal(await backend.complete("", "aard"), "vark");
+	});
+
+	it("keeps prior slip folding hidden throughout installation", async () => {
+		const backend = new NgramBackend();
+		backend.useDictionary(new Set(["because"]));
+		const filler: WordCount[] = Array.from({ length: 2_500 }, (_, i) => [`z${String(i).padStart(4, "0")}`, 1]);
+		let done = false;
+		const adding = backend.usePrior(wordsOnly([["because", 1], ...filler])).then(() => (done = true));
+		const during: NgramSnapshot[] = [];
+		while (!done) {
+			backend.observe("becuase");
+			during.push(backend.snapshot());
+			await new Promise((resolve) => setImmediate(resolve));
+		}
+		await adding;
+		assert.equal(during.length, 2, "validation and installation each yield once");
+		for (const [index, snapshot] of during.entries()) {
+			assert.deepEqual(snapshot.unigrams, [["becuase", index + 1]]);
+			assert.deepEqual(snapshot.folded, []);
+		}
+		backend.observe("becuase");
+		assert.deepEqual(backend.snapshot().folded, [["becuase", 1]], "folding starts after publication");
+	});
+
 	it("keeps the prior out of the snapshot", async () => {
 		const backend = new NgramBackend();
 		await backend.usePrior(shipped);
