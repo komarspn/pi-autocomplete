@@ -1,10 +1,19 @@
 import { proseRuns } from "./prose-gate.ts";
+import { SENTENCE_START, type WebPrior } from "./web-prior.ts";
 import type { WordPredictionBackend } from "./word-completion-provider.ts";
 
 /** Counts of the words seen after one context, keyed by word id. */
 interface Continuations {
 	total: number;
 	counts: Map<number, number>;
+}
+
+/** The web pair rows of one context word: `[start, end)` in the row arrays, sorted by word. */
+interface WebContinuations {
+	start: number;
+	end: number;
+	/** The sum of the web shares of the rows, at most 1. */
+	covered: number;
 }
 
 /** A word and how often it was seen. */
@@ -32,12 +41,15 @@ const START_ID = -1;
 const ID_LIMIT = 2 ** 26;
 // Weight of the web prior at the unigram level, in learned words. Same as omp's mu1.
 const PRIOR_WEIGHT = 10_000;
+// Weight of the web pairs above the unigram level. Same as omp's web_bigram.
+const WEB_PAIR_WEIGHT = 1;
 // Prior words added between yields to the event loop, so adding the prior never holds up pi for long.
 const SLICE_WORDS = 2_000;
 
 /**
  * Word trigram completion learned from the prompts the user submits, with interpolated absolute
- * discounting. An optional web prior smooths the unigram level. State is in memory only.
+ * discounting. An optional web prior smooths the unigram level and adds web pairs under the learned
+ * bigram level. State is in memory only.
  */
 export class NgramBackend implements WordPredictionBackend {
 	// A word's id is its index here. Ids never change, so the count tables never need renumbering.
@@ -51,6 +63,12 @@ export class NgramBackend implements WordPredictionBackend {
 	// Zero until a prior is in use, so the unigram level is the plain learned share.
 	private priorWeight = 0;
 	private hasPrior = false;
+	/** The web pair rows of each context word id, START_ID for the sentence start. Empty until a prior is in use. */
+	private webPairs = new Map<number, WebContinuations>();
+	/** Word id of each web pair row. */
+	private webWords = new Int32Array(0);
+	/** Web share of each row: how often the word follows its context, out of all the context's occurrences. */
+	private webShares = new Float32Array(0);
 	private readonly bigrams = new Map<number, Continuations>();
 	private readonly trigrams = new Map<number, Continuations>();
 	// Every word id, sorted by word, so the words under a prefix are one contiguous range.
@@ -83,7 +101,10 @@ export class NgramBackend implements WordPredictionBackend {
 		const afterCurrent = current === undefined ? undefined : this.bigrams.get(current);
 		const afterBoth =
 			previous === undefined || current === undefined ? undefined : this.trigrams.get(trigramKey(previous, current));
-		const { words, unigrams, priors, priorWeight, order } = this;
+		const { words, unigrams, priors, priorWeight, order, webWords, webShares } = this;
+		const web = current === undefined ? undefined : this.webPairs.get(current);
+		// Rows and candidates are both sorted by word, so one pass over each matches them up.
+		let row = web ? this.firstRow(web, lower) : 0;
 		let best: string | undefined;
 		let bestScore = 0;
 		let sum = 0;
@@ -93,8 +114,15 @@ export class NgramBackend implements WordPredictionBackend {
 			if (id === undefined || word === undefined || !word.startsWith(lower)) break;
 			// P(word | previous current), each order interpolated with the one below. The unigram level is
 			// the learned count with a Dirichlet prior: (c(w) + mu * p0(w)) / (N + mu).
-			const unigram = ((unigrams[id] ?? 0) + priorWeight * (priors[id] ?? 0)) / (this.total + priorWeight);
-			const score = discounted(afterBoth, id, discounted(afterCurrent, id, unigram));
+			let lowerOrder = ((unigrams[id] ?? 0) + priorWeight * (priors[id] ?? 0)) / (this.total + priorWeight);
+			if (web) {
+				// The web pairs sit between the unigram and learned bigram levels: λ * pw(w | v) + (1 - λ * S(v)) * p1(w),
+				// where S(v) is the share of v's occurrences that the rows cover.
+				while (row < web.end && (words[webWords[row] ?? -1] ?? "") < word) row++;
+				const share = row < web.end && webWords[row] === id ? (webShares[row] ?? 0) : 0;
+				lowerOrder = WEB_PAIR_WEIGHT * share + (1 - WEB_PAIR_WEIGHT * web.covered) * lowerOrder;
+			}
+			const score = discounted(afterBoth, id, discounted(afterCurrent, id, lowerOrder));
 			sum += score;
 			if (score > bestScore) {
 				best = word;
@@ -145,38 +173,63 @@ export class NgramBackend implements WordPredictionBackend {
 	}
 
 	/**
-	 * Mixes web word counts, sorted by word with each word once as loadWebPrior gives them, into the
-	 * unigram level as a Dirichlet prior. Its words join the vocabulary with no learned count, so the
-	 * snapshot never holds them. Adds the words in slices that yield to the event loop; until it
-	 * resolves, completion uses learned words alone, and `observe` and `restore` stay safe to call.
-	 * Call it at most once. Rejects for a second call or an unsorted prior, before changing anything.
+	 * Uses a web prior, laid out as loadWebPrior gives it. Its word counts become a Dirichlet prior on
+	 * the unigram level, and its pairs a level between that and the learned bigrams. Its words join the
+	 * vocabulary with no learned count, so the snapshot never holds them. Adds the prior in slices that
+	 * yield to the event loop; until it resolves, completion uses learned words alone, and `observe` and
+	 * `restore` stay safe to call. Call it at most once. Rejects for a second call, unsorted words, or
+	 * pairs that are unsorted or name a word the prior lacks, before changing anything.
 	 */
-	async usePrior(prior: readonly WordCount[]): Promise<void> {
+	async usePrior(prior: WebPrior): Promise<void> {
 		if (this.hasPrior) throw new Error("A web prior is already in use");
 		// Set before the first yield, so a second call made meanwhile rejects.
 		this.hasPrior = true;
-		let total = 0;
-		let previous = "";
-		for (let i = 0; i < prior.length; i++) {
-			if (i % SLICE_WORDS === SLICE_WORDS - 1) await yieldToEventLoop();
-			const [word, count] = prior[i] ?? ["", 0];
-			if (word <= previous) {
-				this.hasPrior = false;
-				throw new Error(`The web prior is not sorted at "${word}"`);
-			}
-			total += count;
-			previous = word;
+		let total: number;
+		try {
+			total = await checkedTotal(prior);
+		} catch (error) {
+			this.hasPrior = false;
+			throw error;
 		}
 		if (total === 0) return;
 		// Ids interned here stay out of `order`, so `complete` skips them until the merge below.
 		const added: number[] = [];
-		for (let i = 0; i < prior.length; i++) {
+		// The id of each prior word, by its index in `prior.words`.
+		const idOf = new Int32Array(prior.words.length);
+		for (let i = 0; i < prior.words.length; i++) {
 			if (i % SLICE_WORDS === SLICE_WORDS - 1) await yieldToEventLoop();
-			const [word, count] = prior[i] ?? ["", 0];
+			const [word, count] = prior.words[i] ?? ["", 0];
 			const known = this.ids.get(word);
 			const id = known ?? this.intern(word);
 			if (known === undefined) added.push(id);
+			idOf[i] = id;
 			this.priors[id] = count / total;
+		}
+		// Built aside and swapped in with the merge, so `complete` never sees part of the pairs.
+		const { contexts, starts, words: rowWords, counts } = prior.pairs;
+		const webPairs = new Map<number, WebContinuations>();
+		const webWords = new Int32Array(rowWords.length);
+		const webShares = new Float32Array(rowWords.length);
+		for (let group = 0; group < contexts.length; group++) {
+			if (group % SLICE_WORDS === SLICE_WORDS - 1) await yieldToEventLoop();
+			const context = contexts[group] ?? SENTENCE_START;
+			const start = starts[group] ?? 0;
+			const end = starts[group + 1] ?? 0;
+			// pw(w | v) = c(v w) / c(v). The sentence start occurs once per sentence.
+			const occurrences = context === SENTENCE_START ? prior.sentences : (prior.words[context]?.[1] ?? 0);
+			let covered = 0;
+			for (let row = start; row < end; row++) {
+				webWords[row] = idOf[rowWords[row] ?? -1] ?? -1;
+				const share = (counts[row] ?? 0) / occurrences;
+				webShares[row] = share;
+				covered += share;
+			}
+			// The build script prunes counts per source file, so the shares can add up to a little over 1.
+			webPairs.set(context === SENTENCE_START ? START_ID : (idOf[context] ?? -1), {
+				start,
+				end,
+				covered: Math.min(covered, 1),
+			});
 		}
 		// A restore meanwhile sorted some added ids into `order`. Take them out so the merge adds each once.
 		const isAdded = new Uint8Array(this.words.length);
@@ -186,6 +239,9 @@ export class NgramBackend implements WordPredictionBackend {
 			added,
 		);
 		this.priorWeight = PRIOR_WEIGHT;
+		this.webPairs = webPairs;
+		this.webWords = webWords;
+		this.webShares = webShares;
 	}
 
 	/** Rebuilds `order` after words were interned in bulk: one sort instead of a splice per new word. */
@@ -251,19 +307,14 @@ export class NgramBackend implements WordPredictionBackend {
 		return merged.concat(a.slice(i), b.slice(j));
 	}
 
+	/** Index of the first row of `web` whose word is not less than `value`. */
+	private firstRow(web: WebContinuations, value: string): number {
+		return firstNotLess(this.words, this.webWords, web.start, web.end, value);
+	}
+
 	/** Index in `order` of the first word not less than `value`. */
 	private lowerBound(value: string): number {
-		const { words, order } = this;
-		let low = 0;
-		let high = order.length;
-		while (low < high) {
-			const mid = (low + high) >>> 1;
-			const id = order[mid];
-			const word = id === undefined ? undefined : words[id];
-			if (word !== undefined && word < value) low = mid + 1;
-			else high = mid;
-		}
-		return low;
+		return firstNotLess(this.words, this.order, 0, this.order.length, value);
 	}
 
 	private tableSnapshot(table: Map<number, Continuations>, contextOf: (key: number) => string): [string, WordCount[]][] {
@@ -290,6 +341,62 @@ function discounted(continuations: Continuations | undefined, id: number, lower:
 	const { total, counts } = continuations;
 	const seen = Math.max((counts.get(id) ?? 0) - DISCOUNT, 0);
 	return (seen + DISCOUNT * counts.size * lower) / total;
+}
+
+/**
+ * The sum of the web word counts, after checking the order usePrior relies on: words sorted and each
+ * once, pairs sorted by context then word, and every pair word a prior word. Throws before the caller
+ * changes anything. Yields between slices.
+ */
+async function checkedTotal(prior: WebPrior): Promise<number> {
+	let total = 0;
+	let previous = "";
+	for (let i = 0; i < prior.words.length; i++) {
+		if (i % SLICE_WORDS === SLICE_WORDS - 1) await yieldToEventLoop();
+		const [word, count] = prior.words[i] ?? ["", 0];
+		if (word <= previous) throw new Error(`The web prior is not sorted at "${word}"`);
+		total += count;
+		previous = word;
+	}
+	const { contexts, starts, words: rowWords, counts } = prior.pairs;
+	if (starts.length !== contexts.length + 1 || starts[0] !== 0 || starts.at(-1) !== rowWords.length) {
+		throw new Error("The web prior pairs do not split into groups");
+	}
+	if (counts.length !== rowWords.length) throw new Error("The web prior pairs hold a count for each word");
+	const wordAt = (index: number) => prior.words[index]?.[0];
+	for (let group = 0; group < contexts.length; group++) {
+		if (group % SLICE_WORDS === SLICE_WORDS - 1) await yieldToEventLoop();
+		const context = contexts[group] ?? SENTENCE_START;
+		const name = context === SENTENCE_START ? "the sentence start" : `"${wordAt(context)}"`;
+		if (group > 0 && context <= (contexts[group - 1] ?? SENTENCE_START)) {
+			throw new Error(`The web prior pairs are not sorted at context ${name}`);
+		}
+		if (context === SENTENCE_START ? prior.sentences <= 0 : wordAt(context) === undefined) {
+			throw new Error(`The web prior pairs name a context the prior lacks: ${context}`);
+		}
+		const start = starts[group] ?? 0;
+		const end = starts[group + 1] ?? 0;
+		if (end <= start) throw new Error(`The web prior pairs hold no word after context ${name}`);
+		for (let row = start; row < end; row++) {
+			const word = rowWords[row] ?? -1;
+			if (wordAt(word) === undefined) throw new Error(`The web prior pairs name a word the prior lacks: ${word}`);
+			if (row > start && word <= (rowWords[row - 1] ?? -1)) {
+				throw new Error(`The web prior pairs are not sorted at ${name} "${wordAt(word)}"`);
+			}
+		}
+	}
+	return total;
+}
+
+/** Index in `ids[low..high)`, sorted by word, of the first id whose word is not less than `value`. */
+function firstNotLess(words: readonly string[], ids: ArrayLike<number>, low: number, high: number, value: string): number {
+	while (low < high) {
+		const mid = (low + high) >>> 1;
+		const word = words[ids[mid] ?? -1];
+		if (word !== undefined && word < value) low = mid + 1;
+		else high = mid;
+	}
+	return low;
 }
 
 function yieldToEventLoop(): Promise<void> {

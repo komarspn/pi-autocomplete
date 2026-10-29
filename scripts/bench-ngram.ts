@@ -1,10 +1,11 @@
 // Benchmarks NgramBackend.complete on a model trained with synthetic prompts.
 // Run: node --expose-gc scripts/bench-ngram.ts [prompts] [--prior]
 // --prior loads the shipped web prior first and reports its load time; the heap figure then includes it.
+// It also times queries right after a context word with web pairs, where complete walks the pair rows too.
 // Without --expose-gc the heap figure includes garbage and varies from run to run.
 import { performance } from "node:perf_hooks";
 import { NgramBackend } from "../src/ngram-backend.ts";
-import { loadWebPrior } from "../src/web-prior.ts";
+import { loadWebPrior, SENTENCE_START, type WebPrior } from "../src/web-prior.ts";
 
 const args = process.argv.slice(2);
 const PROMPTS = Number(args.find((arg) => !arg.startsWith("--")) ?? 10_000);
@@ -56,14 +57,15 @@ function prompt(): string[] {
 const backend = new NgramBackend();
 globalThis.gc?.();
 const heapBefore = process.memoryUsage().heapUsed;
+let prior: WebPrior | undefined;
 if (USE_PRIOR) {
 	const loadStart = performance.now();
-	const prior = await loadWebPrior();
+	prior = await loadWebPrior();
 	const loadMs = performance.now() - loadStart;
 	if (!prior) throw new Error("The web prior did not load");
 	const useStart = performance.now();
 	await backend.usePrior(prior);
-	console.log(`prior: ${prior.length} words, load ${loadMs.toFixed(0)} ms, usePrior ${(performance.now() - useStart).toFixed(0)} ms`);
+	console.log(`prior: ${prior.words.length} words, ${prior.pairs.contexts.length} contexts, load ${loadMs.toFixed(0)} ms, usePrior ${(performance.now() - useStart).toFixed(0)} ms`);
 }
 const trainStart = performance.now();
 for (let i = 0; i < PROMPTS; i++) backend.observe(`${prompt().join(" ")}.`);
@@ -107,3 +109,28 @@ for (const length of [1, 2]) {
 	console.log(`  ${length}-letter prefix, ${sample.length} queries: ${summary(sample)}`);
 }
 console.log(`ghosts shown for ${((shown / QUERIES) * 100).toFixed(1)}% of queries`);
+
+if (prior && prior.pairs.contexts.length > 0) {
+	const { words } = prior;
+	const { contexts, starts, words: followers } = prior.pairs;
+	// A context with web pairs, and a 1 or 2 letter prefix of one of its words.
+	const paired = Array.from({ length: QUERIES }, () => {
+		const group = Math.floor(random() * contexts.length);
+		const context = contexts[group]!;
+		const [word] = words[followers[integer(starts[group]!, starts[group + 1]! - 1)]!]!;
+		const before = context === SENTENCE_START ? "" : `${words[context]![0]} `;
+		return { before, prefix: word.slice(0, integer(1, Math.min(2, word.length))) };
+	});
+	for (const { before, prefix } of paired.slice(0, 500)) await backend.complete(before, prefix);
+	const byLength = new Map<number, number[]>();
+	for (const { before, prefix } of paired) {
+		const start = performance.now();
+		await backend.complete(before, prefix);
+		byLength.set(prefix.length, [...(byLength.get(prefix.length) ?? []), performance.now() - start]);
+	}
+	console.log(`after a context with web pairs, ${QUERIES} queries:`);
+	for (const length of [1, 2]) {
+		const sample = byLength.get(length) ?? [];
+		console.log(`  ${length}-letter prefix, ${sample.length} queries: ${summary(sample)}`);
+	}
+}

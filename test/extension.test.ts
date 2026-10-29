@@ -294,7 +294,8 @@ describe("extension", () => {
 
 			agree(true);
 			assert.match(await eventually(() => ghostFor("zygo"), /morphic/), /morphic/);
-			assert.match(await ghostFor("flori"), /culture/);
+			// After `the`: at sentence start the web pairs pick `florida` over a word seen once mid-sentence.
+			assert.match(await ghostFor("the flori"), /culture/);
 			assert.doesNotMatch(await ghostFor("vexi"), /llology/, "slash command not learned");
 			await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, ctx());
 			assert.deepEqual(JSON.parse(readFileSync(answerPath(), "utf8")), { answer: "accepted" });

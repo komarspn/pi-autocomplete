@@ -16,7 +16,7 @@ import {
 	type WordCompletionMethod,
 } from "../src/word-completion-setting.ts";
 
-/** An n-gram backend, the store that keeps its counts, and the background load of both counts and prior. */
+/** An n-gram backend, the store that keeps its counts, and the store's background load. */
 interface Engine {
 	backend: NgramBackend;
 	store: NgramStore;
@@ -106,22 +106,17 @@ export default function wordCompletion(pi: ExtensionAPI): void {
 		const loaded = () => {
 			if (engine === started) editor?.resetWordCompletion();
 		};
-		const started: Engine = {
-			backend,
-			store,
-			opened: Promise.all([
-				store.open(sessionDirs).then(loaded),
-				// Read per engine, not kept: the parsed file is garbage once the backend holds it. Without it,
-				// a missing or corrupt file, completion uses learned words alone.
-				loadWebPrior().then(async (prior) => {
-					if (!prior || engine !== started) return;
-					// The shipped file is sorted and this backend is new, so this does not reject.
-					await backend.usePrior(prior);
-					loaded();
-				}),
-			]).then(() => {}),
-		};
+		const started: Engine = { backend, store, opened: store.open(sessionDirs).then(loaded) };
 		engine = started;
+		// Read per engine, not kept: the parsed file is garbage once the backend holds it. Without it,
+		// a missing or corrupt file, completion uses learned words alone. Seeding does not wait for it:
+		// usePrior is safe beside learning, and the 500,000 pairs take a while.
+		void loadWebPrior().then(async (prior) => {
+			if (!prior || engine !== started) return;
+			// The shipped file is sorted and this backend is new, so this does not reject.
+			await backend.usePrior(prior);
+			loaded();
+		});
 	};
 
 	pi.on("session_start", (_event, ctx) => {
