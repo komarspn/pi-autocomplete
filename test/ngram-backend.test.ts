@@ -10,6 +10,8 @@ const MAP_ERA_SNAPSHOT: NgramSnapshot = {
 		["write", 3], ["a", 3], ["summary", 3], ["please", 2], ["summarize", 2], ["then", 1], ["zygomorphic", 1],
 		["flower", 1],
 	],
+	// That backend had no folding. Written here because snapshot() writes it.
+	folded: [],
 	bigrams: [
 		["", [["open", 3], ["run", 3], ["write", 3], ["please", 2], ["then", 1]]],
 		["open", [["the", 3]]],
@@ -52,6 +54,20 @@ const MAP_ERA_COMPLETIONS: [before: string, prefix: string, suffix: string][] = 
 	["pull the ", "z", "ygomorphic"],
 	["", "t", "he"],
 ];
+
+/** A backend whose prior and dictionary hold the real words the misspelling tests fold into, or must not. */
+async function slipBackend(): Promise<NgramBackend> {
+	const backend = new NgramBackend();
+	const words = ["auth", "canonical", "instead", "subagent", "the", "were"];
+	backend.useDictionary(new Set(words));
+	await backend.usePrior({ words: words.map((word) => [word, 1000]), sentences: 0, pairs: noPairs() });
+	return backend;
+}
+
+/** The learned unigram counts, in no particular order. */
+function learnedCounts(backend: NgramBackend): Map<string, number> {
+	return new Map(backend.snapshot().unigrams);
+}
 
 describe("NgramBackend", () => {
 	it("completes a word learned from an observed prompt", async () => {
@@ -151,7 +167,7 @@ describe("NgramBackend", () => {
 		const live = ["cry", "ant", "cab", "zoo", "cod", "cog", "eel", "cot"];
 		// Real spellings, so each shows after one use.
 		backend.useDictionary(new Set([...unigrams.map(([word]) => word), ...live, "cub"]));
-		backend.restore({ unigrams, bigrams: [], trigrams: [] });
+		backend.restore({ unigrams, folded: [], bigrams: [], trigrams: [] });
 		// Live words land before, between, and after the restored ones.
 		for (const word of live) backend.observe(word);
 		// Eight equally likely words under "c" leave the best at 0.125, below 0.15. Losing any one would show a ghost.
@@ -193,6 +209,69 @@ describe("NgramBackend", () => {
 		assert.equal(await backend.complete("", "zygo"), "morphic");
 		// One web count in 1001 leaves xylograph mostly to the learned count.
 		assert.equal(await backend.complete("", "xylo"), "graph");
+	});
+
+	it("learns a rare misspelling as the real web word one edit away, and never suggests it", async () => {
+		const backend = await slipBackend();
+		backend.observe("isntead cannonical");
+		assert.deepEqual(learnedCounts(backend), new Map([["instead", 1], ["canonical", 1]]));
+		backend.observe("isntead cannonical");
+		assert.equal(await backend.complete("", "isnt"), null);
+		assert.equal(await backend.complete("", "cann"), null);
+	});
+
+	it("folds a spelling into a word outside the prior that the user typed 3 times as often", async () => {
+		const backend = await slipBackend();
+		for (let i = 0; i < 2; i++) backend.observe("frobnicate");
+		backend.observe("frobnciate");
+		assert.deepEqual(learnedCounts(backend), new Map([["frobnicate", 2], ["frobnciate", 1]]));
+		backend.observe("frobnicate");
+		backend.observe("frobnciate");
+		// frobnciate's second typing needs 6 of frobnicate, which has 3. The first was not folded.
+		assert.deepEqual(learnedCounts(backend), new Map([["frobnicate", 3], ["frobnciate", 2]]));
+		const fresh = await slipBackend();
+		for (let i = 0; i < 3; i++) fresh.observe("frobnicate");
+		fresh.observe("frobnciate");
+		assert.deepEqual(learnedCounts(fresh), new Map([["frobnicate", 4]]));
+	});
+
+	it("stops folding a spelling into a web word once it was typed 3 times", async () => {
+		const backend = await slipBackend();
+		for (let i = 0; i < 3; i++) backend.observe("cannonical");
+		assert.deepEqual(learnedCounts(backend), new Map([["canonical", 3]]));
+		backend.observe("cannonical");
+		assert.deepEqual(learnedCounts(backend), new Map([["canonical", 3], ["cannonical", 1]]));
+		assert.equal(await backend.complete("", "cann"), null);
+		backend.observe("cannonical");
+		assert.equal(await backend.complete("", "cann"), "onical");
+	});
+
+	it("keeps how often a folded spelling was typed across a snapshot", async () => {
+		const before = await slipBackend();
+		for (let i = 0; i < 3; i++) before.observe("cannonical");
+		const after = await slipBackend();
+		after.restore(before.snapshot());
+		after.observe("cannonical");
+		assert.deepEqual(learnedCounts(after), new Map([["canonical", 3], ["cannonical", 1]]));
+	});
+
+	it("does not fold a web word outside the dictionary with a web count of 2,000,000", async () => {
+		const backend = new NgramBackend();
+		backend.useDictionary(new Set(["cost", "separate"]));
+		const words: WordCount[] = [
+			["const", 2_000_000], ["cost", 400_000_000], ["separate", 90_000_000], ["seperate", 1_999_999],
+		];
+		await backend.usePrior({ words, sentences: 0, pairs: noPairs() });
+		backend.observe("const seperate");
+		assert.deepEqual(learnedCounts(backend), new Map([["const", 1], ["separate", 1]]));
+	});
+
+	it("does not fold a word into one that differs in its first letter, its last letter or an apostrophe", async () => {
+		const backend = await slipBackend();
+		for (let i = 0; i < 2; i++) backend.observe("oauth subagents we're");
+		assert.deepEqual(learnedCounts(backend), new Map([["oauth", 2], ["subagents", 2], ["we're", 2]]));
+		assert.equal(await backend.complete("", "oau"), "th");
+		assert.equal(await backend.complete("", "we'"), "re");
 	});
 
 	it("does not extend a prefix that is itself the likeliest word", async () => {

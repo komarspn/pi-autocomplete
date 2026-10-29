@@ -26,6 +26,8 @@ A word trigram model ranks the words under the prefix you typed. It starts with 
 
 A word that is neither a common English word nor in the built-in dictionary is suggested only after you have used it twice, so a typo you made once does not come back as a ghost.
 
+A slip such as `isntead` or `cannonical` counts as the word you meant, when that word is one typing edit away and is either a real spelling or a word you type at least 3 times as often. A real spelling is a dictionary word or a very common English word. The fold applies to words of 5 or more letters, and never touches an apostrophe or changes the first or last letter, except by swapping it with its neighbour, so `oauth`, `subagents` and `we're` stay as typed. Once you have typed a spelling 3 times, it no longer folds into a common word and is learned as itself, unless you type the other word 3 times as often.
+
 On first start, if `~/.claude/history.jsonl` or `~/.codex/history.jsonl` exists (or the same file under `CLAUDE_CONFIG_DIR` or `CODEX_HOME`), the extension asks once whether to learn from those prompts too. Nothing is read before you agree.
 
 Everything stays on your machine. Learned counts are saved to `word-completion/ngram.json` in pi's agent directory (`~/.pi/agent` by default). Deleting that file resets what was learned. The next start reads your pi sessions again.
@@ -49,5 +51,7 @@ The code is MIT licensed.
 The built-in word counts are derived from the Google Books Ngram dataset, English, version 20200217, licensed under [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/). `scripts/build-web-prior.ts` rebuilds them from the source.
 
 The built-in dictionary is a word list generated from the English Speller Database (ESDB, previously SCOWLv2), size 60, American English, under its MIT-like license. `scripts/build-dictionary.ts` rebuilds it.
+
+The misspelling folding is ported from [oh-my-pi](https://github.com/can1357/oh-my-pi) under the MIT License.
 
 See [NOTICE](NOTICE) for the full attribution.

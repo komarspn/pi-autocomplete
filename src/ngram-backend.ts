@@ -1,4 +1,5 @@
 import { proseRuns } from "./prose-gate.ts";
+import { slipNeighbours } from "./slip-neighbours.ts";
 import { SENTENCE_START, type WebPrior } from "./web-prior.ts";
 import type { WordPredictionBackend } from "./word-completion-provider.ts";
 
@@ -22,6 +23,8 @@ export type WordCount = [word: string, count: number];
 /** Plain-data copy of everything an NgramBackend has learned, for saving to disk. */
 export interface NgramSnapshot {
 	unigrams: WordCount[];
+	/** Times each spelling was learned as another word. Its unigram count holds the other times it was typed. */
+	folded: WordCount[];
 	/** Words seen after each one-word context. */
 	bigrams: [context: string, counts: WordCount[]][];
 	/** Words seen after each two-word context, keyed as `previous\0current`. */
@@ -46,6 +49,16 @@ const WEB_PAIR_WEIGHT = 1;
 // Times a word outside the prior and the dictionary must be learned before it is suggested, so a
 // one-off typo does not come back as a ghost. Same as omp's min_count.
 const MIN_COUNT = 2;
+// Words shorter than this never fold into another spelling: short words have too many real neighbours.
+// Same as omp's HYGIENE_MIN_CHARS.
+const FOLD_MIN_LENGTH = 5;
+// Web count from which a word outside the dictionary is a real spelling. omp's TRUSTED_WEB_COUNT is 200,000 on
+// Web 1T; on Books counts that takes in common misspellings such as occured (1,065,180) and seperate (255,620).
+const TRUSTED_WEB_COUNT = 2_000_000;
+// A spelling typed fewer times than this may fold into a web word. Same as omp's canon_max_count.
+const CANON_MAX_COUNT = 3;
+// A spelling folds into a word the user typed at least this many times as often. Same as omp's canon_ratio.
+const CANON_RATIO = 3;
 // Prior words added between yields to the event loop, so adding the prior never holds up pi for long.
 const SLICE_WORDS = 2_000;
 
@@ -60,11 +73,15 @@ export class NgramBackend implements WordPredictionBackend {
 	private readonly ids = new Map<string, number>();
 	/** Unigram counts, indexed by word id. */
 	private readonly unigrams: number[] = [];
+	/** Times each spelling was learned as another word, indexed by word id. */
+	private readonly folded: number[] = [];
 	private total = 0;
 	/** Each word's share of the web prior, indexed by word id. Zero for words the prior lacks. */
 	private readonly priors: number[] = [];
 	// Zero until a prior is in use, so the unigram level is the plain learned share.
 	private priorWeight = 0;
+	// The web share of TRUSTED_WEB_COUNT. Infinite until a prior is in use, so no share reaches it.
+	private trustedShare = Number.POSITIVE_INFINITY;
 	private hasPrior = false;
 	/** The web pair rows of each context word id, START_ID for the sentence start. Empty until a prior is in use. */
 	private webPairs = new Map<number, WebContinuations>();
@@ -85,6 +102,7 @@ export class NgramBackend implements WordPredictionBackend {
 			let previous = START_ID;
 			let current = START_ID;
 			for (const word of run) {
+				// A folded spelling's counts and context go to the word it folded into, as in omp.
 				const id = this.count(word);
 				countContinuation(this.bigrams, current, id);
 				if (current !== START_ID) countContinuation(this.trigrams, trigramKey(previous, current), id);
@@ -148,8 +166,13 @@ export class NgramBackend implements WordPredictionBackend {
 		this.unigrams.forEach((count, id) => {
 			if (count > 0) unigrams.push([this.wordOf(id), count]);
 		});
+		const folded: WordCount[] = [];
+		this.folded.forEach((count, id) => {
+			if (count > 0) folded.push([this.wordOf(id), count]);
+		});
 		return {
 			unigrams,
+			folded,
 			bigrams: this.tableSnapshot(this.bigrams, (id) => this.wordOf(id)),
 			trigrams: this.tableSnapshot(this.trigrams, (key) => {
 				const current = key % ID_LIMIT;
@@ -165,6 +188,10 @@ export class NgramBackend implements WordPredictionBackend {
 			const id = this.intern(word);
 			this.unigrams[id] = (this.unigrams[id] ?? 0) + count;
 			this.total += count;
+		}
+		for (const [word, count] of snapshot.folded) {
+			const id = this.intern(word);
+			this.folded[id] = (this.folded[id] ?? 0) + count;
 		}
 		for (const [context, counts] of snapshot.bigrams) {
 			const contextId = intern(context);
@@ -245,6 +272,7 @@ export class NgramBackend implements WordPredictionBackend {
 			added,
 		);
 		this.priorWeight = PRIOR_WEIGHT;
+		this.trustedShare = TRUSTED_WEB_COUNT / total;
 		this.webPairs = webPairs;
 		this.webWords = webWords;
 		this.webShares = webShares;
@@ -268,14 +296,60 @@ export class NgramBackend implements WordPredictionBackend {
 		this.order = [...this.ids].sort(([a], [b]) => compare(a, b)).map(([, id]) => id);
 	}
 
-	/** Counts one occurrence of `word` and returns its id, keeping `order` sorted when the word is new. */
+	/**
+	 * Counts one occurrence of `word`, or of the real word it folds into, and returns the id counted.
+	 * Keeps `order` sorted when the word is new.
+	 */
 	private count(word: string): number {
 		const known = this.ids.get(word);
-		const id = known ?? this.intern(word);
+		const original = known ?? this.intern(word);
+		if (known === undefined) this.order.splice(this.lowerBound(word), 0, original);
+		const id = this.canonical(original, word);
+		if (id !== original) this.folded[original] = (this.folded[original] ?? 0) + 1;
 		this.unigrams[id] = (this.unigrams[id] ?? 0) + 1;
 		this.total++;
-		if (known === undefined) this.order.splice(this.lowerBound(word), 0, id);
 		return id;
+	}
+
+	/**
+	 * The id a typing of `word` counts toward. A word that is not a real spelling folds into a slip
+	 * neighbour the user typed CANON_RATIO times as often, or, while it was typed fewer than
+	 * CANON_MAX_COUNT times, into a real prior word. A typed neighbour beats a web one; among each, the
+	 * commoner wins. Ported from omp's Model::canonical; see slip-neighbours.ts for the license.
+	 */
+	private canonical(id: number, word: string): number {
+		if (this.isRealSpelling(id, word) || [...word].length < FOLD_MIN_LENGTH) return id;
+		// Counting this typing, as omp does.
+		const typed = this.typedCount(id) + 1;
+		const mayFoldIntoWeb = typed <= CANON_MAX_COUNT;
+		let best = id;
+		let bestScore = 0;
+		for (const neighbour of slipNeighbours(word)) {
+			const other = this.ids.get(neighbour);
+			if (other === undefined) continue;
+			const otherTyped = this.typedCount(other);
+			const share = this.priors[other] ?? 0;
+			let score: number;
+			// A typed neighbour scores at least CANON_RATIO and a web share at most 1, so typed ones win.
+			if (otherTyped >= CANON_RATIO * typed) score = otherTyped + share;
+			else if (mayFoldIntoWeb && share > 0 && this.isRealSpelling(other, neighbour)) score = share;
+			else continue;
+			if (score > bestScore) {
+				best = other;
+				bestScore = score;
+			}
+		}
+		return best;
+	}
+
+	/** Whether `word` is a real spelling: in the dictionary, or at least TRUSTED_WEB_COUNT on the web. */
+	private isRealSpelling(id: number, word: string): boolean {
+		return this.dictionary.has(word) || (this.priors[id] ?? 0) >= this.trustedShare;
+	}
+
+	/** Times the spelling with `id` was typed, counted as itself or folded into another word. */
+	private typedCount(id: number): number {
+		return (this.unigrams[id] ?? 0) + (this.folded[id] ?? 0);
 	}
 
 	/** The id of `word`, adding it with a zero count when new. Does not touch `order`. */
@@ -286,6 +360,7 @@ export class NgramBackend implements WordPredictionBackend {
 			if (id >= ID_LIMIT) throw new Error(`Vocabulary is full at ${ID_LIMIT} words`);
 			this.words.push(word);
 			this.unigrams.push(0);
+			this.folded.push(0);
 			this.priors.push(0);
 			this.ids.set(word, id);
 		}

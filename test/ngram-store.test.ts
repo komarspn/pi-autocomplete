@@ -186,10 +186,17 @@ describe("NgramStore", () => {
 	});
 
 	const snapshotWith = (unigrams: unknown) =>
-		JSON.stringify({ version: 1, ngram: { unigrams, bigrams: [], trigrams: [] }, offsets: {}, learned: [] });
+		JSON.stringify({ version: 2, ngram: { unigrams, folded: [], bigrams: [], trigrams: [] }, offsets: {}, learned: [] });
 	for (const [name, content] of [
-		["corrupt", "{\"version\":1,\"ngram\":{\"unigr"],
-		["incompatible", JSON.stringify({ version: 0, ngram: { unigrams: [["stale", 1]] }, cursors: {} })],
+		["corrupt", "{\"version\":2,\"ngram\":{\"unigr"],
+		["incompatible", JSON.stringify({ version: 0, ngram: { unigrams: [["stale", 2]] }, cursors: {} })],
+		// Version 1 counted a misspelling as itself. Its counts are well formed but mean something else now.
+		["from version 1", JSON.stringify({
+			version: 1,
+			ngram: { unigrams: [["stale", 2]], bigrams: [], trigrams: [] },
+			offsets: {},
+			learned: [],
+		})],
 		["malformed", snapshotWith([["zygomorphic", -1]])],
 		["overflowing", snapshotWith([["zygomorphic", 1e308], ["zygote", 1e308]])],
 	] as const) {
@@ -200,6 +207,7 @@ describe("NgramStore", () => {
 			const first = await openStore();
 			first.store.close();
 			assert.equal(await first.backend.complete("a ", "zygo"), "morphic");
+			assert.equal(await first.backend.complete("", "stal"), null);
 
 			const second = await openStore();
 			second.store.close();

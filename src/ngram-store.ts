@@ -17,7 +17,8 @@ interface StoreFile {
 }
 
 // Bump when the file shape or the meaning of the counts changes. Older files are then discarded and rebuilt.
-const VERSION = 1;
+// Version 2: a rare misspelling counts as the real word it folds into.
+const VERSION = 2;
 // Same cadence as omp: save once changes stop for 5 minutes, and never leave a change unsaved past 15.
 const IDLE_SAVE_MS = 5 * 60_000;
 const MAX_SAVE_MS = 15 * 60_000;
@@ -210,8 +211,9 @@ export class NgramStore {
 
 function isStoreFile(value: unknown): value is StoreFile {
 	if (!isObject(value) || value.version !== VERSION || !isObject(value.ngram)) return false;
-	const { unigrams, bigrams, trigrams } = value.ngram;
-	if (!isWordCounts(unigrams) || !isContextTable(bigrams) || !isContextTable(trigrams)) return false;
+	const { unigrams, folded, bigrams, trigrams } = value.ngram;
+	if (!isWordCounts(unigrams) || !isWordCounts(folded)) return false;
+	if (!isContextTable(bigrams) || !isContextTable(trigrams)) return false;
 	if (!isObject(value.offsets) || !Object.values(value.offsets).every(isCount)) return false;
 	if (value.seeded !== undefined && typeof value.seeded !== "boolean") return false;
 	return Array.isArray(value.learned) && value.learned.every(isCount);

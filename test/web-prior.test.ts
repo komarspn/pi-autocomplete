@@ -25,7 +25,12 @@ after(() => {
 function sorted(snapshot: NgramSnapshot): NgramSnapshot {
 	const byFirst = <T extends [string, unknown]>(rows: T[]): T[] => rows.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 	const table = (rows: [string, WordCount[]][]) => byFirst(rows.map(([context, counts]) => [context, byFirst(counts)]));
-	return { unigrams: byFirst(snapshot.unigrams), bigrams: table(snapshot.bigrams), trigrams: table(snapshot.trigrams) };
+	return {
+		unigrams: byFirst(snapshot.unigrams),
+		folded: byFirst(snapshot.folded),
+		bigrams: table(snapshot.bigrams),
+		trigrams: table(snapshot.trigrams),
+	};
 }
 
 /** A prior with words alone, no sentences and no pairs. */
@@ -178,7 +183,7 @@ describe("NgramBackend with the web prior", () => {
 		assert.equal(await backend.complete("", "a2000"), null, "no prior before it resolves");
 		// Between every slice, so some restores land after prior words got ids.
 		while (!isDone) {
-			backend.restore({ unigrams: [["zygomorphic", 1]], bigrams: [], trigrams: [] });
+			backend.restore({ unigrams: [["zygomorphic", 1]], folded: [], bigrams: [], trigrams: [] });
 			backend.observe("quixotic");
 			await new Promise((resolve) => setImmediate(resolve));
 		}
