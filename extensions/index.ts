@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { loadDictionary } from "../src/dictionary.ts";
 import { foreignHistoryFiles, loadSeedingAnswer, readForeignPrompts, saveSeedingAnswer } from "../src/foreign-history.ts";
 import { NgramBackend } from "../src/ngram-backend.ts";
 import { NgramStore } from "../src/ngram-store.ts";
@@ -115,6 +116,12 @@ export default function wordCompletion(pi: ExtensionAPI): void {
 			if (!prior || engine !== started) return;
 			// The shipped file is sorted and this backend is new, so this does not reject.
 			await backend.usePrior(prior);
+			loaded();
+		});
+		// Read per engine for the same reason. Without it, a word outside the prior needs two uses.
+		void loadDictionary().then((words) => {
+			if (!words || engine !== started) return;
+			backend.useDictionary(words);
 			loaded();
 		});
 	};

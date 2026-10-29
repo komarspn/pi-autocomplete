@@ -43,6 +43,9 @@ const ID_LIMIT = 2 ** 26;
 const PRIOR_WEIGHT = 10_000;
 // Weight of the web pairs above the unigram level. Same as omp's web_bigram.
 const WEB_PAIR_WEIGHT = 1;
+// Times a word outside the prior and the dictionary must be learned before it is suggested, so a
+// one-off typo does not come back as a ghost. Same as omp's min_count.
+const MIN_COUNT = 2;
 // Prior words added between yields to the event loop, so adding the prior never holds up pi for long.
 const SLICE_WORDS = 2_000;
 
@@ -69,6 +72,8 @@ export class NgramBackend implements WordPredictionBackend {
 	private webWords = new Int32Array(0);
 	/** Web share of each row: how often the word follows its context, out of all the context's occurrences. */
 	private webShares = new Float32Array(0);
+	/** Real spellings, which may be suggested after one use. Empty until a dictionary is in use. */
+	private dictionary: ReadonlySet<string> = new Set();
 	private readonly bigrams = new Map<number, Continuations>();
 	private readonly trigrams = new Map<number, Continuations>();
 	// Every word id, sorted by word, so the words under a prefix are one contiguous range.
@@ -123,8 +128,9 @@ export class NgramBackend implements WordPredictionBackend {
 				lowerOrder = WEB_PAIR_WEIGHT * share + (1 - WEB_PAIR_WEIGHT * web.covered) * lowerOrder;
 			}
 			const score = discounted(afterBoth, id, discounted(afterCurrent, id, lowerOrder));
+			// A hidden word still takes its share of the posterior, as in omp, so it can keep a weak ghost back.
 			sum += score;
-			if (score > bestScore) {
+			if (score > bestScore && this.isSuggestible(id, word)) {
 				best = word;
 				bestScore = score;
 			}
@@ -242,6 +248,19 @@ export class NgramBackend implements WordPredictionBackend {
 		this.webPairs = webPairs;
 		this.webWords = webWords;
 		this.webShares = webShares;
+	}
+
+	/**
+	 * Uses a dictionary of real spellings, lowercase, as loadDictionary gives it. A learned word in it is
+	 * suggested after one use; other words outside the prior need MIN_COUNT. It adds no word to the vocabulary.
+	 */
+	useDictionary(words: ReadonlySet<string>): void {
+		this.dictionary = words;
+	}
+
+	/** Whether `word` may be suggested: a prior or dictionary word, or one learned at least MIN_COUNT times. */
+	private isSuggestible(id: number, word: string): boolean {
+		return (this.priors[id] ?? 0) > 0 || (this.unigrams[id] ?? 0) >= MIN_COUNT || this.dictionary.has(word);
 	}
 
 	/** Rebuilds `order` after words were interned in bulk: one sort instead of a splice per new word. */

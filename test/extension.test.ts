@@ -164,6 +164,8 @@ describe("extension", () => {
 		const { ghostFor, learn } = await startSession();
 		assert.doesNotMatch(await ghostFor("zygo"), /morphic/);
 
+		// A word outside the prior and the dictionary shows from its second use.
+		await learn("the zygomorphic flower");
 		await learn("the zygomorphic flower");
 		assert.match(await ghostFor("zygo"), /morphic/);
 	});
@@ -171,7 +173,7 @@ describe("extension", () => {
 	it("does not learn input from RPC clients or extensions", async () => {
 		const { handlers, editor } = await startSession();
 		for (const source of ["rpc", "extension"] as const) {
-			await handlers.get("input")?.({ type: "input", text: "the zygomorphic flower", source }, ctx());
+			await handlers.get("input")?.({ type: "input", text: "the zygomorphic flower, a zygomorphic one", source }, ctx());
 		}
 		editor.setText("zygo");
 		editor.render(40);
@@ -182,7 +184,7 @@ describe("extension", () => {
 	it("turns word completion off with the command and keeps it off after a restart", async () => {
 		// A past session, not a live prompt: a store closed before its load finishes saves nothing,
 		// and the fake session writes no file to learn the prompt from again.
-		const pastSession = writePastSession("--restart--", "the zygomorphic flower", 1);
+		const pastSession = writePastSession("--restart--", "the zygomorphic flower, a zygomorphic one", 1);
 		try {
 			const first = await startSession();
 			assert.match(await eventually(() => first.ghostFor("zygo"), /morphic/), /morphic/);
@@ -208,7 +210,7 @@ describe("extension", () => {
 	it("does not learn prompts while word completion is off", async () => {
 		const { run, learn, ghostFor, handlers } = await startSession();
 		await run("off");
-		await learn("the xerophytic cactus");
+		await learn("the xerophytic cactus, a xerophytic plant");
 		await run("ngram");
 		assert.doesNotMatch(await ghostFor("xero"), /phytic/);
 		await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, ctx());
@@ -239,7 +241,7 @@ describe("extension", () => {
 
 	it("rejects an unknown method and offers the known ones", async () => {
 		const { run, commands, ghostFor, learn, handlers } = await startSession();
-		await learn("the zygomorphic flower");
+		await learn("the zygomorphic flower, a zygomorphic one");
 		const notes = await run("smollm");
 		assert.equal(notes[0]?.type, "error");
 		assert.match(await ghostFor("zygo"), /morphic/);
@@ -263,9 +265,12 @@ describe("extension", () => {
 		before(() => {
 			mkdirSync(join(foreignHome, ".claude"), { recursive: true });
 			mkdirSync(join(foreignHome, ".codex"), { recursive: true });
-			const claude = [{ display: "the zygomorphic flower" }, { display: "/compact keep the vexillology part" }];
+			const claude = [
+				{ display: "the zygomorphic flower, a zygomorphic one" },
+				{ display: "/compact keep the vexillology part and vexillology" },
+			];
 			writeFileSync(join(foreignHome, ".claude", "history.jsonl"), claude.map((e) => `${JSON.stringify(e)}\n`).join(""));
-			const codex = { ts: 1, text: "the floriculture notes" };
+			const codex = { ts: 1, text: "the floriculture notes, more floriculture" };
 			writeFileSync(join(foreignHome, ".codex", "history.jsonl"), `${JSON.stringify(codex)}\n`);
 		});
 
@@ -296,7 +301,7 @@ describe("extension", () => {
 
 			agree(true);
 			assert.match(await eventually(() => ghostFor("zygo"), /morphic/), /morphic/);
-			// After `the`: at sentence start the web pairs pick `florida` over a word seen once mid-sentence.
+			// After `the`: at sentence start the web pairs pick `florida` over a word seen twice mid-sentence.
 			assert.match(await ghostFor("the flori"), /culture/);
 			assert.doesNotMatch(await ghostFor("vexi"), /llology/, "slash command not learned");
 			await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, ctx());

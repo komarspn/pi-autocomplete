@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { NgramBackend, type NgramSnapshot, type WordCount } from "../src/ngram-backend.ts";
+import { noPairs } from "../src/web-prior.ts";
 
 // Saved by the backend that kept its counts in Maps keyed by word strings, with the completions it gave.
 const MAP_ERA_SNAPSHOT: NgramSnapshot = {
@@ -56,7 +57,7 @@ describe("NgramBackend", () => {
 	it("completes a word learned from an observed prompt", async () => {
 		const backend = new NgramBackend();
 		assert.equal(await backend.complete("", "zygo"), null);
-		backend.observe("please look at the zygomorphic flower");
+		for (let i = 0; i < 2; i++) backend.observe("please look at the zygomorphic flower");
 		assert.equal(await backend.complete("a ", "zygo"), "morphic");
 	});
 
@@ -77,11 +78,14 @@ describe("NgramBackend", () => {
 	it("returns null when no candidate reaches the show threshold", async () => {
 		const backend = new NgramBackend();
 		// Ten equally likely words under "c": the best has a posterior of 0.1, below 0.15.
-		for (const word of ["cat", "cow", "cup", "cab", "cod", "cog", "cot", "cub", "cue", "cry"]) backend.observe(word);
+		const words = ["cat", "cow", "cup", "cab", "cod", "cog", "cot", "cub", "cue", "cry"];
+		backend.useDictionary(new Set(words));
+		for (const word of words) backend.observe(word);
 		assert.equal(await backend.complete("", "c"), null);
 		// Five of them leave the best at 0.2, above the threshold.
 		const fewer = new NgramBackend();
-		for (const word of ["cat", "cow", "cup", "cab", "cod"]) fewer.observe(word);
+		fewer.useDictionary(new Set(words));
+		for (const word of words.slice(0, 5)) fewer.observe(word);
 		assert.notEqual(await fewer.complete("", "c"), null);
 	});
 
@@ -95,6 +99,8 @@ describe("NgramBackend", () => {
 
 	it("learns the prose of a prompt but not its code", async () => {
 		const backend = new NgramBackend();
+		// Real spellings show after one use, so a word learned from the code by mistake would show.
+		backend.useDictionary(new Set(["zygomorphic", "quixotic", "xylograph", "vexillology", "floriculture"]));
 		backend.observe("please read\n```ts\nconst zygomorphic = quixotic;\n```\nthen floriculture");
 		backend.observe("run `xylograph` and open src/vexillology <kbd>jabberwock</kbd> now");
 		backend.observe("rename snakeCaseThing and also_this or pi2go");
@@ -106,6 +112,7 @@ describe("NgramBackend", () => {
 
 	it("does not learn words after an unclosed backtick in the same paragraph", async () => {
 		const backend = new NgramBackend();
+		backend.useDictionary(new Set(["zygomorphic", "quixotic", "floriculture"]));
 		backend.observe("run `zygomorphic\nquixotic too\n\nthen floriculture");
 		assert.equal(await backend.complete("", "zygo"), null);
 		assert.equal(await backend.complete("", "quix"), null);
@@ -129,6 +136,8 @@ describe("NgramBackend", () => {
 
 	it("loads a snapshot saved by the Map-based backend and gives the same completions", async () => {
 		const backend = new NgramBackend();
+		// That backend suggested words learned once. As a real spelling, zygomorphic still is.
+		backend.useDictionary(new Set(["zygomorphic"]));
 		backend.restore(MAP_ERA_SNAPSHOT);
 		for (const [before, prefix, suffix] of MAP_ERA_COMPLETIONS) {
 			assert.equal(await backend.complete(before, prefix), suffix, `${before}|${prefix}`);
@@ -139,9 +148,12 @@ describe("NgramBackend", () => {
 	it("counts every word under a prefix when words arrive out of order, live and restored", async () => {
 		const backend = new NgramBackend();
 		const unigrams: WordCount[] = [["cow", 1], ["cat", 1], ["dog", 1], ["bee", 1], ["cup", 1]];
+		const live = ["cry", "ant", "cab", "zoo", "cod", "cog", "eel", "cot"];
+		// Real spellings, so each shows after one use.
+		backend.useDictionary(new Set([...unigrams.map(([word]) => word), ...live, "cub"]));
 		backend.restore({ unigrams, bigrams: [], trigrams: [] });
 		// Live words land before, between, and after the restored ones.
-		for (const word of ["cry", "ant", "cab", "zoo", "cod", "cog", "eel", "cot"]) backend.observe(word);
+		for (const word of live) backend.observe(word);
 		// Eight equally likely words under "c" leave the best at 0.125, below 0.15. Losing any one would show a ghost.
 		assert.equal(await backend.complete("", "c"), null);
 		backend.observe("cub");
@@ -153,6 +165,34 @@ describe("NgramBackend", () => {
 		for (const [prefix, suffix] of others) {
 			assert.equal(await backend.complete("", prefix), suffix, prefix);
 		}
+	});
+
+	it("suggests a word outside the prior and the dictionary only once it was learned twice", async () => {
+		const backend = new NgramBackend();
+		backend.observe("check the zygomorphic flower");
+		assert.equal(await backend.complete("", "zygo"), null);
+		backend.observe("zygomorphic again");
+		assert.equal(await backend.complete("", "zygo"), "morphic");
+	});
+
+	it("uses a word it does not suggest yet as context for the next word", async () => {
+		const backend = new NgramBackend();
+		for (let i = 0; i < 3; i++) backend.observe("glimmer");
+		backend.observe("flurb gizmo");
+		backend.observe("gizmo");
+		assert.equal(await backend.complete("", "flu"), null, "flurb is hidden");
+		assert.equal(await backend.complete("", "g"), "limmer");
+		assert.equal(await backend.complete("flurb ", "g"), "izmo");
+	});
+
+	it("suggests a dictionary word or a web word learned once", async () => {
+		const backend = new NgramBackend();
+		backend.useDictionary(new Set(["zygomorphic"]));
+		await backend.usePrior({ words: [["the", 1000], ["xylograph", 1]], sentences: 0, pairs: noPairs() });
+		backend.observe("zygomorphic xylograph");
+		assert.equal(await backend.complete("", "zygo"), "morphic");
+		// One web count in 1001 leaves xylograph mostly to the learned count.
+		assert.equal(await backend.complete("", "xylo"), "graph");
 	});
 
 	it("does not extend a prefix that is itself the likeliest word", async () => {

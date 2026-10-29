@@ -45,7 +45,16 @@ function writeSession(lines: readonly string[], file = sessionFile()): string {
 	return file;
 }
 
-async function openStore(backend = new NgramBackend()) {
+// Words the tests learn once. As real spellings they show after one use, like a dictionary word does.
+const DICTIONARY = new Set(["zygomorphic", "floriculture", "vexillology", "pamphlet"]);
+
+function dictionaryBackend(): NgramBackend {
+	const backend = new NgramBackend();
+	backend.useDictionary(DICTIONARY);
+	return backend;
+}
+
+async function openStore(backend = dictionaryBackend()) {
 	const store = new NgramStore(backend, snapshotPath);
 	await store.open([sessions]);
 	return { store, backend };
@@ -307,6 +316,22 @@ describe("NgramStore", () => {
 		assert.equal(await second.store.seed(async () => ["zygomorphic"]), true);
 		second.store.close();
 		assert.equal(await second.backend.complete("", "zygo"), "morphic");
+	});
+
+	it("counts seeded, bootstrapped, saved and live uses alike toward the two a new word needs", async () => {
+		writeSession([userLine("jabberwock")]);
+		const first = await openStore(new NgramBackend());
+		first.store.observe("xylograph");
+		assert.equal(await first.backend.complete("", "jabb"), null);
+		assert.equal(await first.backend.complete("", "xylo"), null);
+		await first.store.seed(async () => ["jabberwock"]);
+		assert.equal(await first.backend.complete("", "jabb"), "erwock");
+		first.store.close();
+
+		writeSession([userLine("xylograph")], sessionFile("s2.jsonl"));
+		const second = await openStore(new NgramBackend());
+		second.store.close();
+		assert.equal(await second.backend.complete("", "xylo"), "graph");
 	});
 
 	it("does not seed before the snapshot is loaded or after closing", async () => {

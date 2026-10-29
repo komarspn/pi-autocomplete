@@ -147,6 +147,8 @@ describe("NgramBackend with the web prior", () => {
 
 	it("finds every word under a prefix after merging a prior into learned words", async () => {
 		const backend = new NgramBackend();
+		// Real spellings, so each learned word shows after one use.
+		backend.useDictionary(new Set(["zoo", "dog", "cow", "aardvark"]));
 		for (const word of ["zoo", "dog", "cow", "aardvark"]) backend.observe(word);
 		await backend.usePrior(wordsOnly([["ant", 1], ["bee", 1], ["cow", 1], ["cup", 1], ["eel", 1]]));
 		const expected: [prefix: string, suffix: string][] = [
@@ -200,7 +202,7 @@ describe("NgramBackend with the web prior", () => {
 		const prior = await loadWebPrior(join(root, "absent.tsv.gz"));
 		const backend = new NgramBackend();
 		if (prior) await backend.usePrior(prior);
-		backend.observe("please look at the zygomorphic flower");
+		for (let i = 0; i < 2; i++) backend.observe("please look at the zygomorphic flower");
 		assert.equal(await backend.complete("", "zygo"), "morphic");
 		assert.equal(await backend.complete("", "becau"), null);
 	});
@@ -264,7 +266,7 @@ describe("NgramBackend with web pairs", () => {
 	for (const [name, rows] of broken) {
 		it(`rejects pairs with ${name} without changing completions`, async () => {
 			const backend = new NgramBackend();
-			backend.observe("cart");
+			for (let i = 0; i < 2; i++) backend.observe("cart");
 			await assert.rejects(backend.usePrior(priorOf(vehicleWords, 0, rows)), /pairs/);
 			assert.equal(await backend.complete("drive ", "ca"), "rt");
 			await backend.usePrior(vehicles);

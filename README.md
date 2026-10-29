@@ -24,6 +24,8 @@ pi -e npm:pi-word-completion
 
 A word trigram model ranks the words under the prefix you typed. It starts with built-in counts of the 150,000 most common English words, so common words complete on a fresh install. It then learns from the prompts you submit and from your past pi sessions. Words you use often win over more common English words.
 
+A word that is neither a common English word nor in the built-in dictionary is suggested only after you have used it twice, so a typo you made once does not come back as a ghost.
+
 On first start, if `~/.claude/history.jsonl` or `~/.codex/history.jsonl` exists (or the same file under `CLAUDE_CONFIG_DIR` or `CODEX_HOME`), the extension asks once whether to learn from those prompts too. Nothing is read before you agree.
 
 Everything stays on your machine. Learned counts are saved to `word-completion/ngram.json` in pi's agent directory (`~/.pi/agent` by default). Deleting that file resets what was learned. The next start reads your pi sessions again.
@@ -44,4 +46,8 @@ The choice is saved and applies to later sessions.
 
 The code is MIT licensed.
 
-The built-in word counts are derived from the Google Books Ngram dataset, English, version 20200217, licensed under [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/). `scripts/build-web-prior.ts` rebuilds them from the source. See [NOTICE](NOTICE) for the full attribution.
+The built-in word counts are derived from the Google Books Ngram dataset, English, version 20200217, licensed under [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/). `scripts/build-web-prior.ts` rebuilds them from the source.
+
+The built-in dictionary is a word list generated from the English Speller Database (ESDB, previously SCOWLv2), size 60, American English, under its MIT-like license. `scripts/build-dictionary.ts` rebuilds it.
+
+See [NOTICE](NOTICE) for the full attribution.

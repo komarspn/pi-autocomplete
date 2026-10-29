@@ -1,7 +1,22 @@
-This package includes word counts derived from the Google Books Ngram dataset,
-English, version 20200217, by Google Books (https://books.google.com/ngrams).
-The source data is licensed under the Creative Commons Attribution 3.0
-Unported License (https://creativecommons.org/licenses/by/3.0/). Source data
-© 2019 Google. The counts were summed over years, lowercased, stripped of
-part-of-speech tags and cut to the most frequent entries. Google does not
-endorse this package.
+This package includes word and two-word counts derived from the Google Books
+Ngram dataset, English, version 20200217, by Google Books
+(https://books.google.com/ngrams). The source data is licensed under the
+Creative Commons Attribution 3.0 Unported License
+(https://creativecommons.org/licenses/by/3.0/). Source data © 2019 Google.
+The counts were summed over
+years, lowercased, stripped of part-of-speech tags and cut to the most frequent
+entries. Google does not endorse this package.
+
+This package includes a word list generated from the English Speller Database
+(ESDB, previously known as SCOWLv2), size 60, American English
+(https://github.com/en-wl/wordlist).
+
+Copyright 2000-2026 by Kevin Atkinson
+
+Permission to use, copy, modify, distribute, and sell any part of the English
+Speller Database (ESDB, previously known as SCOWLv2), or word lists
+created from it, is hereby granted without fee, provided that the above
+copyright notice appears in all copies and that both the above copyright
+notice and this notice appear in supporting documentation.  Kevin Atkinson
+makes no representations about the suitability of this database for any
+purpose.  It is provided "as is" without express or implied warranty.
