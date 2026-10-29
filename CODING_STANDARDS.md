@@ -94,7 +94,7 @@ No formatter is configured. Match the existing code:
 
 - Tabs for indentation, double quotes, semicolons.
 - Trailing commas in multi-line argument lists, arrays, and objects.
-- Lines up to about 130 columns, counting a tab as 4.
+- Lines up to 130 columns, counting a tab as 4. `scripts/check-line-length.sh` enforces this in the pre-commit hook.
 - Early returns instead of nested `if` blocks.
 
 ## Pi package rules

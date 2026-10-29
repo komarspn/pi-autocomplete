@@ -81,7 +81,8 @@ function writePastSession(name: string, text: string, timestamp: number): string
 	const dir = join(agentDir, "sessions", name);
 	mkdirSync(dir, { recursive: true });
 	const message = { role: "user", content: text, timestamp };
-	writeFileSync(join(dir, "s.jsonl"), `${JSON.stringify({ type: "message", id: "a1", parentId: null, timestamp: "", message })}\n`);
+	const entry = { type: "message", id: "a1", parentId: null, timestamp: "", message };
+	writeFileSync(join(dir, "s.jsonl"), `${JSON.stringify(entry)}\n`);
 	return dir;
 }
 
@@ -264,7 +265,8 @@ describe("extension", () => {
 			mkdirSync(join(foreignHome, ".codex"), { recursive: true });
 			const claude = [{ display: "the zygomorphic flower" }, { display: "/compact keep the vexillology part" }];
 			writeFileSync(join(foreignHome, ".claude", "history.jsonl"), claude.map((e) => `${JSON.stringify(e)}\n`).join(""));
-			writeFileSync(join(foreignHome, ".codex", "history.jsonl"), `${JSON.stringify({ ts: 1, text: "the floriculture notes" })}\n`);
+			const codex = { ts: 1, text: "the floriculture notes" };
+			writeFileSync(join(foreignHome, ".codex", "history.jsonl"), `${JSON.stringify(codex)}\n`);
 		});
 
 		after(() => {

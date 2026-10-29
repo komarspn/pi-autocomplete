@@ -1,2 +1,3 @@
+scripts/check-line-length.sh
 pnpm -s typecheck
-pnpm -s test
+node --test --test-reporter=dot "test/**/*.test.ts"

@@ -42,7 +42,9 @@ describe("readForeignPrompts", () => {
 			{ display: "the zygomorphic flower", pastedContents: {}, timestamp: 1, project: "/p" },
 			{ text: "an older quixotic entry", timestamp: 2 },
 		]);
-		const codex = writeLines(join(root, ".codex", "history.jsonl"), [{ session_id: "s", ts: 3, text: "the floriculture notes" }]);
+		const codex = writeLines(join(root, ".codex", "history.jsonl"), [
+			{ session_id: "s", ts: 3, text: "the floriculture notes" },
+		]);
 		assert.deepEqual(await readForeignPrompts([claude, codex]), [
 			"the zygomorphic flower",
 			"an older quixotic entry",
